@@ -1,0 +1,74 @@
+[
+  {
+    "id": "01-ode-to-joy",
+    "title": "Ода к радости (фрагмент)",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\01-ode-to-joy.musicxml",
+    "note": "четверти и пунктир — базовый уровень",
+    "measures": 8,
+    "events": 30,
+    "beats": 32,
+    "meter": "4/4",
+    "key": "D major",
+    "problems": []
+  },
+  {
+    "id": "02-waltz-3-4",
+    "title": "Учебный вальс",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\02-waltz-3-4.musicxml",
+    "note": "размер 3/4, половинные и целая ноты",
+    "measures": 8,
+    "events": 20,
+    "beats": 24,
+    "meter": "3/4",
+    "key": "C major",
+    "problems": []
+  },
+  {
+    "id": "03-etude-eighths",
+    "title": "Этюд восьмыми",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\03-etude-eighths.musicxml",
+    "note": "восьмые и целая нота",
+    "measures": 8,
+    "events": 36,
+    "beats": 32,
+    "meter": "4/4",
+    "key": "G major",
+    "problems": []
+  },
+  {
+    "id": "04-etude-sixteenths",
+    "title": "Этюд шестнадцатыми (2/4)",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\04-etude-sixteenths.musicxml",
+    "note": "шестнадцатые, бемоль в ключе",
+    "measures": 8,
+    "events": 29,
+    "beats": 16,
+    "meter": "2/4",
+    "key": "F major",
+    "problems": []
+  },
+  {
+    "id": "05-minor-study",
+    "title": "Этюд ля минор",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\05-minor-study.musicxml",
+    "note": "минор со случайным соль-диезом",
+    "measures": 8,
+    "events": 18,
+    "beats": 24,
+    "meter": "3/4",
+    "key": "A minor",
+    "problems": []
+  },
+  {
+    "id": "06-six-eight",
+    "title": "Песенка в размере 6/8",
+    "file": "F:\\Web\\My\\FluteBand AI\\server\\fixtures\\bench\\06-six-eight.musicxml",
+    "note": "размер 6/8, пунктирные четверти",
+    "measures": 8,
+    "events": 14,
+    "beats": 24,
+    "meter": "6/8",
+    "key": "G major",
+    "problems": []
+  }
+]

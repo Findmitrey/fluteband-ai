@@ -1,0 +1,31 @@
+# временные файлы диагностики браузера и серверов
+.tmp/
+tools/certs/
+node_modules/
+package-lock.json
+
+# рабочие каталоги распознавания и стенда точности
+.omr-bench/
+.omr-work/
+.piptmp/
+server/deps/
+
+# готовые звуковые файлы для прослушивания (создаются npm run render:wav)
+artifacts/
+
+# собранные пакеты для хостинга (создаются npm run build:static / npm run pack:space)
+dist/
+dist-space/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# редакторы и ОС
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

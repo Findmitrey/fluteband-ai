@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>PROBE: running</title>
+</head>
+<body>
+  <pre id="out">выполняется…</pre>
+  <script type="module">
+    // Изолирующая проверка: работает ли офлайн-рендер звука в текущем окружении.
+    const out = document.querySelector('#out');
+    const report = (data) => {
+      out.textContent = JSON.stringify(data, null, 2);
+      document.title = data.ok ? 'PROBE: OK' : 'PROBE: FAIL';
+    };
+    const timeout = (label, ms, promise) => Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`таймаут ${ms} мс: ${label}`)), ms)),
+    ]);
+
+    (async () => {
+      const started = Date.now();
+      const delayMs = Number(new URLSearchParams(location.search).get('delay') || 0);
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      const OfflineCtx = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+      const result = { hasOffline: !!OfflineCtx, requestedDelayMs: delayMs };
+      try {
+        const ctx = new OfflineCtx(2, 44100, 44100);
+        result.length = ctx.length;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0, 0);
+        gain.gain.linearRampToValueAtTime(0.5, 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, 0.8);
+        osc.frequency.value = 440;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(0);
+        osc.stop(0.9);
+        const buffer = await timeout('startRendering', 8000, ctx.startRendering());
+        const data = buffer.getChannelData(0);
+        let peak = 0;
+        for (let i = 0; i < data.length; i += 1) peak = Math.max(peak, Math.abs(data[i]));
+        result.ok = true;
+        result.channels = buffer.numberOfChannels;
+        result.renderedSamples = buffer.length;
+        result.peak = Number(peak.toFixed(4));
+        result.elapsedMs = Date.now() - started;
+      } catch (error) {
+        result.ok = false;
+        result.error = error.message;
+        result.elapsedMs = Date.now() - started;
+      }
+      report(result);
+    })();
+  </script>
+</body>
+</html>

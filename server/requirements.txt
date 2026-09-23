@@ -1,0 +1,17 @@
+# FluteBand AI — OMR-сервис (боевой режим). Всё бесплатно и с открытым кодом.
+#
+# Базовый вариант (только сервис-обёртка, движок stub):
+#   pip install -r requirements.txt
+#   uvicorn main:app --app-dir server --host 0.0.0.0 --port 8000
+#
+# Распознавание печатных нот (основной кандидат, MIT):
+#   pip install oemer
+#
+# Альтернативный движок:
+#   pip install homr
+#
+# Резерв (нужна Java; в Windows-установщике Audiveris JRE идёт в комплекте):
+#   https://github.com/Audiveris/audiveris/releases
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9

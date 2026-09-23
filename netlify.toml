@@ -1,0 +1,49 @@
+# FluteBand AI — настройки Netlify.
+#
+# Нужны только для выкладки из репозитория (Netlify сам запустит сборку). Если выкладываете готовую
+# папку через Netlify Drop, этот файл не используется — важные заголовки уже лежат внутри dist/_headers.
+#
+# Проверка перед выкладкой: npm run build:static && npm run check:static
+
+[build]
+  # Сборки как таковой нет: команда просто раскладывает app/ в dist/ и проверяет пакет
+  command = "npm run build:static"
+  publish = "dist"
+
+[build.environment]
+  # Версия Node закреплена, чтобы сборка не зависела от версии по умолчанию на площадке
+  NODE_VERSION = "20"
+
+# «Красивые адреса» Netlify превращают /index.html в /. Приложение кэширует оболочку по конкретным
+# адресам (в том числе ./index.html), а стартовый адрес PWA — именно ./index.html, поэтому выключаем
+# переписывание: так все файлы отдаются своими адресами и офлайн собирается целиком.
+[build.processing.html]
+  pretty_urls = false
+
+[[headers]]
+  for = "/service-worker.js"
+  [headers.values]
+    # Service worker нельзя держать в кэше: иначе обновление приложения не доедет до ученика
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Content-Type = "application/manifest+json; charset=utf-8"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+
+# Прокси распознавания через Netlify НЕ включаем: у прокси-запросов Netlify есть предел 26 секунд
+# (docs.netlify.com → Rewrites and proxies), а распознавание плотной страницы занимает 130 с на
+# бесплатном тарифе сервиса. Приложение обращается к сервису напрямую — адрес вводится на экране
+# «Сканировать», у сервиса открыт CORS. Если захотите попробовать прокси, раскомментируйте и укажите
+# адрес своего пространства; для быстрых (разреженных) страниц этого хватит:
+#
+# [[redirects]]
+#   from = "/api/*"
+#   to = "https://ваше-пространство.hf.space/:splat"
+#   status = 200
+#   force = true

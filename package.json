@@ -1,0 +1,34 @@
+{
+  "name": "fluteband-ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FluteBand AI — умный аккомпаниатор и транспонировщик для учеников (PWA + OMR-сервис)",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test --test-isolation=none tests/core.test.mjs tests/pipeline.test.mjs tests/manual.test.mjs tests/export.test.mjs tests/imports.test.mjs tests/image.test.mjs tests/perspective.test.mjs tests/photo.test.mjs tests/library.test.mjs tests/audio.test.mjs",
+    "serve": "node tools/serve.mjs",
+    "serve:https": "node tools/serve.mjs --https",
+    "omr": "python server/standalone.py",
+    "omr:real": "python -m uvicorn main:app --app-dir server --host 127.0.0.1 --port 8000",
+    "omr:check": "node tools/omr-check.mjs",
+    "selfcheck": "node tools/selfcheck.mjs",
+    "check:offline": "node tools/offline-check.mjs",
+    "render:wav": "node tools/render-demo-wav.mjs",
+    "bench": "node tools/omr-bench.mjs --engine=homr --scale=40 --crop",
+    "bench:pages": "node tools/make-bench.mjs",
+    "bench:prep": "node tools/prep-bench.mjs --engine=homr --label=base",
+    "bench:photo": "node tools/photo-bench.mjs --engine=homr --label=base --preset=tilt && node tools/photo-bench.mjs --engine=homr --label=base --preset=hard",
+    "demo:page": "node tools/make-demo-page.mjs",
+    "accuracy": "node tools/omr-accuracy.mjs",
+    "bench:real": "node tools/real-bench.mjs --engine=homr",
+    "build:static": "node tools/build-static.mjs",
+    "check:static": "node tools/static-check.mjs",
+    "check:netlify": "node tools/static-check.mjs --prefix=/",
+    "check:netlify:pretty": "node tools/static-check.mjs --prefix=/ --pretty-urls",
+    "pack:space": "node tools/pack-space.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

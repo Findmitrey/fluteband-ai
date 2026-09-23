@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>FluteBand AI — умный аккомпаниатор и транспонировщик</title>
+  <meta name="description" content="Сканируйте бумажные ноты, получайте фортепианный минус, меняйте темп и тональность под свой инструмент.">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon.svg">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="FluteBand AI">
+  <link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="./icons/icon.svg" alt="">
+        <div class="brand-text">
+          <h1>FluteBand AI</h1>
+          <p class="tagline">Умный аккомпаниатор и транспонировщик для учеников</p>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="Разделы приложения">
+        <button class="tab active" data-view="library" type="button">Библиотека</button>
+        <button class="tab" data-view="scan" type="button">Сканировать</button>
+        <button class="tab" data-view="player" type="button">Минус</button>
+      </nav>
+    </header>
+
+    <main class="content">
+      <section id="view-library" class="view"></section>
+      <section id="view-scan" class="view hidden"></section>
+      <section id="view-player" class="view hidden"></section>
+    </main>
+
+    <footer class="footer">
+      <span>Бесплатные инструменты: чистый JS + Web Audio + открытые OMR-движки.</span>
+      <span id="footer-note">Данные пьес хранятся только на этом устройстве.</span>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script type="module">
+    import { bootstrap } from './js/app.js';
+    bootstrap().catch((error) => {
+      const toast = document.querySelector('#toast');
+      if (toast) {
+        toast.textContent = `Ошибка запуска: ${error.message}`;
+        toast.classList.add('visible');
+      }
+      console.error(error);
+    });
+  </script>
+</body>
+</html>

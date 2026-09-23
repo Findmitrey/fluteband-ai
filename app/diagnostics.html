@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>SELFCHECK: running</title>
+  <link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+  <!-- Диагностическая страница: проверяет браузерный слой настоящими вызовами (звук, canvas, IndexedDB, экспорт). -->
+  <div id="app">
+    <header class="topbar">
+      <nav class="tabs">
+        <button class="tab active" data-view="library" type="button">Библиотека</button>
+        <button class="tab" data-view="scan" type="button">Сканировать</button>
+        <button class="tab" data-view="player" type="button">Минус</button>
+      </nav>
+    </header>
+    <main class="content">
+      <section id="view-library" class="view"></section>
+      <section id="view-scan" class="view hidden"></section>
+      <section id="view-player" class="view hidden"></section>
+    </main>
+    <div id="toast" class="toast"></div>
+  </div>
+  <h1>Самоконтроль FluteBand AI</h1>
+  <pre id="result" style="white-space:pre-wrap">выполняется…</pre>
+
+  <script type="module">
+    import { FluteBandApp } from './js/app.js';
+    import { demoById } from './js/demo.js';
+    import { buildMidiFile, describeMidi } from './js/midi.js';
+    import { describeWav } from './js/wav.js';
+    import { renderEventsToWav } from './js/wav-render.js';
+    import { listScores, saveScore, deleteScore, clearScores, scoresByTag } from './js/storage.js';
+    import { measureStarts } from './js/timeline.js';
+    import { scoreFromManualInput } from './js/manual.js';
+    import { demoRecognitionScore } from './js/recognition.js';
+    import { makeThumbnail } from './js/camera.js';
+    import { scoreToMusicXml, musicXmlToScore } from './js/musicxml.js';
+
+    const results = [];
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    function render(currentName = null) {
+      const failed = results.filter((r) => !r.ok);
+      const criticalFailed = failed.filter((r) => r.critical);
+      document.title = criticalFailed.length ? 'SELFCHECK: FAIL' : 'SELFCHECK: running';
+      document.querySelector('#result').textContent = JSON.stringify(
+        {
+          verdict: criticalFailed.length ? 'FAIL' : 'running',
+          current: currentName,
+          passed: results.filter((r) => r.ok).length,
+          failed: failed.length,
+          userAgent: navigator.userAgent,
+          secureContext: window.isSecureContext,
+          results,
+        },
+        null,
+        2,
+      );
+    }
+
+    function withTimeout(promise, ms, label) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`таймаут ${ms} мс: ${label}`)), ms)),
+      ]);
+    }
+
+    async function check(name, critical, fn, { timeoutMs = 30000 } = {}) {
+      render(name);
+      try {
+        const value = await withTimeout(Promise.resolve().then(fn), timeoutMs, name);
+        results.push({ name, critical, ok: true, value });
+      } catch (error) {
+        results.push({ name, critical, ok: false, error: error?.message || String(error) });
+      }
+      render(null);
+    }
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    // Проверки сравнения: подробное сообщение важнее краткости, потому что читают их глазами
+    assert.equal = (actual, expected, message) => {
+      if (actual !== expected) {
+        throw new Error(`${message || 'значения не совпали'}: получено ${JSON.stringify(actual)}, ожидалось ${JSON.stringify(expected)}`);
+      }
+    };
+    assert.deepEqual = (actual, expected, message) => {
+      const a = JSON.stringify(actual);
+      const b = JSON.stringify(expected);
+      if (a !== b) throw new Error(`${message || 'структуры не совпали'}: получено ${a}, ожидалось ${b}`);
+    };
+    assert.notEqual = (actual, expected, message) => {
+      if (actual === expected) throw new Error(`${message || 'значения совпали, а не должны'}: оба ${JSON.stringify(actual)}`);
+    };
+    assert.notDeepEqual = (actual, expected, message) => {
+      const a = JSON.stringify(actual);
+      const b = JSON.stringify(expected);
+      if (a === b) throw new Error(`${message || 'структуры совпали, а не должны'}: обе ${a}`);
+    };
+
+    const app = new FluteBandApp(document.querySelector('#app'));
+    await check('запуск приложения', true, async () => {
+      await withTimeout(app.init(), 12000, 'init');
+      return app.state.view;
+    });
+
+    await check('открытие демо-пьесы и генерация минуса', true, async () => {
+      app.openScore(demoById('demo-ode-to-joy'), { source: 'demo' });
+      const acc = app.state.accompaniment;
+      assert(acc.events.length === 32, `ожидалось 32 события, получено ${acc.events.length}`);
+      assert(acc.style === 'march', `стиль ${acc.style}`);
+      assert(app.state.transport.events.length === 32, 'транспорт не получил события');
+      return { events: acc.events.length, style: acc.style, bass: acc.events[0].midi };
+    });
+
+    await check('экран «Минус» отрисован', true, async () => {
+      const title = document.querySelector('#p-title').textContent;
+      const cells = document.querySelectorAll('#p-harmony .harmony-cell').length;
+      const playButton = document.querySelector('#p-play')?.textContent;
+      assert(title === 'Ода к радости (фрагмент)', `заголовок: ${title}`);
+      assert(cells === 8, `ячеек аккордов: ${cells}`);
+      assert(!!playButton, 'нет кнопки воспроизведения');
+      return { title, cells, playButton };
+    });
+
+    await check('пианола реально рисует ноты', true, async () => {
+      const canvas = document.querySelector('#pianola');
+      app.state.pianola.resize();
+      app.state.pianola.draw(0);
+      const ctx = canvas.getContext('2d');
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let painted = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        // фон тёмный (#0f172a); считаем «нарисованное» как заметно более светлые или цветные пиксели
+        if (data[i] > 40 || data[i + 1] > 50 || data[i + 2] > 70) painted += 1;
+      }
+      assert(painted > 500, `нарисованных пикселей всего ${painted}`);
+      return { paintedPixels: painted, size: `${canvas.width}x${canvas.height}` };
+    });
+
+    await check('Web Audio: контекст и планирование нот', true, async () => {
+      const ctx = app.state.synth.ctx;
+      ctx.resume().catch(() => undefined); // не ждём: в headless автозапуск звука может быть запрещён
+      app.state.synth.noteOn([60, 64, 67], ctx.currentTime + 0.02, 0.4, 0.7);
+      return { state: ctx.state, sampleRate: ctx.sampleRate, engine: app.state.synth.engine };
+    });
+
+    await check('транспорт: старт, позиция, стоп', false, async () => {
+      app.state.transport.play({ countIn: false });
+      await sleep(500);
+      const position = app.state.transport.positionBeats;
+      const playing = app.state.transport.playing;
+      app.state.transport.stop();
+      return { position: Number(position.toFixed(3)), playing };
+    });
+
+    await check('повтор такта (луп) и переход по тактам', true, async () => {
+      const starts = measureStarts(app.state.score);
+      const range = app.state.transport.setLoopRange(starts[2], starts[3]);
+      assert(range && range.start === starts[2], 'луп не установлен');
+      assert(app.measureIndexAtBeat(starts[5]) === 5, 'неверный индекс такта');
+      app.seekByMeasure(1);
+      const index = app.measureIndexAtBeat(app.state.transport.positionBeats);
+      app.state.transport.setLoopRange(null, null);
+      return { loop: range, indexAfterSeek: index };
+    });
+
+    await check('транспонирование под кларнет B♭', true, async () => {
+      app.updateSettings({ instrumentId: 'clarinet-bb', transposeMode: 'auto' });
+      const acc = app.rebuildAccompaniment();
+      assert(acc.transpositionSemitones === -2, `сдвиг ${acc.transpositionSemitones}`);
+      assert(acc.events[0].midi[0] === 36, `бас ${acc.events[0].midi[0]}`);
+      app.updateSettings({ instrumentId: 'flute', transposeMode: 'auto' });
+      app.rebuildAccompaniment();
+      return { semitones: acc.transpositionSemitones, soundingKey: acc.concertScore.key.tonic };
+    });
+
+    await check('правка аккорда вручную меняет минус', true, async () => {
+      const score = app.state.score;
+      score.measures[0].harmony = [{ beat: 0, dur: 4, symbol: 'Gm', source: 'manual' }];
+      const acc = app.rebuildAccompaniment();
+      const first = acc.events.find((e) => e.startBeat === 0);
+      assert(first.midi[0] === 43, `бас G2 ожидался 43, получено ${first.midi[0]}`);
+      assert(acc.events.some((e) => e.symbol === 'Gm'), 'аккорд Gm не применён');
+      return { bass: first.midi, symbol: first.symbol };
+    });
+
+    await check('экспорт MIDI', true, async () => {
+      const acc = app.state.accompaniment;
+      const bytes = buildMidiFile({ events: acc.events, tempo: app.state.score.tempo, meter: app.state.score.meter });
+      const info = describeMidi(bytes);
+      assert(info.ok, 'заголовок MThd повреждён');
+      assert(bytes.length > 300, `файл слишком мал: ${bytes.length}`);
+      return { size: bytes.length, ...info };
+    });
+
+    await check('экспорт WAV через OfflineAudioContext', true, async () => {
+      const acc = app.state.accompaniment;
+      const bytes = await renderEventsToWav({
+        events: acc.events,
+        tempo: app.state.score.tempo,
+        totalBeats: acc.totalBeats,
+        sampleRate: 22050,
+      });
+      const info = describeWav(bytes);
+      assert(info.ok, 'заголовок RIFF повреждён');
+      assert(info.dataSize > 10000, `данных слишком мало: ${info.dataSize}`);
+      // проверяем, что в аудио есть реальный сигнал, а не тишина
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let peak = 0;
+      for (let i = 44; i + 1 < bytes.length; i += 2) peak = Math.max(peak, Math.abs(view.getInt16(i, true)));
+      assert(peak > 1000, `пик сигнала слишком тихий: ${peak}`);
+      const seconds = info.dataSize / (info.sampleRate * 2 * info.channels);
+      return { size: bytes.length, seconds: Number(seconds.toFixed(2)), peak };
+    });
+
+    await check('локальное хранилище (IndexedDB)', true, async () => {
+      await clearScores();
+      await saveScore(app.state.score);
+      const scores = await listScores();
+      assert(scores.length >= 1, 'пьеса не сохранилась');
+      return { stored: scores.length, title: scores[0].title };
+    });
+
+    await check('библиотека: теги, поиск по ним и обложка снятой страницы', true, async () => {
+      await clearScores();
+      // Обложку делаем тем же кодом, что и при съёмке страницы
+      const canvas = document.createElement('canvas');
+      canvas.width = 120;
+      canvas.height = 160;
+      const ctx2 = canvas.getContext('2d');
+      ctx2.fillStyle = '#fff';
+      ctx2.fillRect(0, 0, 120, 160);
+      ctx2.strokeStyle = '#111';
+      ctx2.lineWidth = 2;
+      for (let i = 0; i < 5; i += 1) {
+        ctx2.beginPath();
+        ctx2.moveTo(12, 32 + i * 22);
+        ctx2.lineTo(108, 32 + i * 22);
+        ctx2.stroke();
+      }
+      const pageBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const cover = await makeThumbnail(pageBlob, { maxWidth: 60 });
+      assert(cover.startsWith('data:image/jpeg'), `обложка не JPEG: ${cover.slice(0, 24)}`);
+
+      await saveScore({
+        ...(demoById('demo-ode-to-joy') || app.state.score),
+        id: 'selfcheck-tagged',
+        title: 'Этюд для проверки',
+        composer: 'Черни',
+        tags: ['класс 2'],
+        cover,
+      });
+      const byTag = await scoresByTag('класс 2');
+      assert(byTag.some((s) => s.id === 'selfcheck-tagged'), 'поиск по индексу тегов не нашёл пьесу');
+
+      app.setView('library');
+      const view = app.views.library;
+      await view.refresh();
+      assert.equal(view.visibleCount(), 1, `в списке ${view.visibleCount()} пьес вместо 1`);
+      const img = view.root.querySelector('#saved-list img.cover');
+      assert(img && img.src.startsWith('data:image/jpeg'), 'обложка не показана в списке');
+
+      const search = view.root.querySelector('#lib-search');
+      search.value = 'черни';
+      search.dispatchEvent(new Event('input'));
+      await sleep(60);
+      assert.equal(view.visibleCount(), 1, 'поиск по автору не нашёл пьесу');
+      search.value = 'шопен';
+      search.dispatchEvent(new Event('input'));
+      await sleep(60);
+      assert.equal(view.visibleCount(), 0, 'поиск не отфильтровал чужое имя');
+      search.value = '';
+      search.dispatchEvent(new Event('input'));
+      await sleep(60);
+
+      const chip = view.root.querySelector('#lib-tags [data-tag-filter="класс 2"]');
+      assert(chip, 'нет чипа тега в библиотеке');
+      chip.click();
+      await sleep(60);
+      assert.equal(view.visibleCount(), 1, 'фильтр по тегу потерял пьесу');
+      const meta = view.root.querySelector('#saved-list .list-meta').textContent;
+      assert(meta.includes('Этюд') === false && meta.length > 0, 'метрики пьесы не отрисованы');
+
+      // Вёрстка строки: обложка, название и теги реально занимают место, а не схлопнуты.
+      // Узлы перезапрашиваем: каждый refresh пересобирает список, старые ссылки становятся «висячими».
+      const coverRect = view.root.querySelector('#saved-list img.cover').getBoundingClientRect();
+      assert(coverRect.width > 20 && coverRect.height > 20, `обложка схлопнута: ${Math.round(coverRect.width)}×${Math.round(coverRect.height)}`);
+      const titleRect = view.root.querySelector('#saved-list .list-title').getBoundingClientRect();
+      assert(titleRect.width > 40, `название схлопнуто: ${Math.round(titleRect.width)} px`);
+      const rowRect = view.root.querySelector('#saved-list .list-row').getBoundingClientRect();
+      assert(rowRect.height >= coverRect.height, 'строка ниже обложки');
+      const tagRect = view.root.querySelector('#saved-list .list-actions .tag').getBoundingClientRect();
+      assert(tagRect.width > 10, 'чип тега в строке схлопнут');
+
+      return {
+        coverKb: Math.round(cover.length / 1024),
+        tags: byTag.length,
+        shown: view.visibleCount(),
+        meta: meta.trim(),
+        cover: `${Math.round(coverRect.width)}×${Math.round(coverRect.height)}`,
+      };
+    });
+
+    await check('страницы сборника: вторая и третья страницы приклеиваются к пьесе', true, async () => {
+      const first = demoById('demo-ode-to-joy') || app.state.score;
+      app.openScore({ ...first, id: 'selfcheck-pages', title: 'Сборник (3 страницы)', pages: 1, pageStarts: [0] }, { source: 'omr' });
+      const before = app.state.score.measures.length;
+      const page2 = demoRecognitionScore('noHarmony');
+      const result = app.appendPage(page2);
+      assert(result.ok, result.reason || 'страница не приклеилась');
+      const merged = app.state.score;
+      assert.equal(merged.measures.length, before + page2.measures.length, 'такты не сложились');
+      assert.equal(merged.pages, 2, `страниц: ${merged.pages}`);
+      assert.equal(merged.pageStarts[1], before, 'не отмечена граница страницы');
+      assert.equal(merged.measures[merged.measures.length - 1].number, String(merged.measures.length), 'нумерация тактов сбилась');
+      const metaText = app.views.player.root.querySelector('#p-meta').textContent;
+      assert(metaText.includes('2 стр.'), `в шапке нет числа страниц: ${metaText}`);
+
+      // Третья страница ведёт себя так же: пьеса продолжается, а не начинается заново
+      const page3 = demoRecognitionScore('twoVoice');
+      const third = app.appendPage(page3);
+      assert(third.ok, third.reason || 'третья страница не приклеилась');
+      assert.equal(app.state.score.pages, 3, `страниц после третьей: ${app.state.score.pages}`);
+      assert.equal(app.state.score.measures.length, before + page2.measures.length + page3.measures.length, 'третья страница потеряла такты');
+      assert.equal(app.state.score.pageStarts.length, 3, 'не отмечены все границы страниц');
+      assert(app.views.player.root.querySelector('#p-meta').textContent.includes('3 стр.'), 'в шапке не 3 страницы');
+
+      // Собранная пьеса должна пережить экспорт и сохраниться целиком
+      const whole = app.state.score;
+      const xml = scoreToMusicXml(whole);
+      const back = musicXmlToScore(xml);
+      assert.equal(back.measures.length, whole.measures.length, 'MusicXML потерял такты');
+      await saveScore(whole);
+      const saved = (await listScores()).find((s) => s.id === 'selfcheck-pages');
+      assert(saved && saved.pages === 3 && saved.measures.length === whole.measures.length, 'собранная пьеса сохранилась не целиком');
+      return { measures: whole.measures.length, pages: whole.pages, pageStarts: whole.pageStarts, xmlKb: Math.round(xml.length / 1024) };
+    });
+
+    await check('экспорт MusicXML кнопкой на экране «Минус»', true, async () => {
+      const player = app.views.player;
+      const btn = player.root.querySelector('#p-xml');
+      assert(btn, 'нет кнопки экспорта MusicXML');
+      btn.click();
+      await sleep(80);
+      const status = player.root.querySelector('#p-export-status').textContent;
+      assert(/\.musicxml/.test(status), `в строке экспорта нет имени файла: ${status}`);
+      const kb = Number((status.match(/\((\d+) КБ/) || [])[1] || 0);
+      assert(kb > 0, `файл MusicXML пустой: ${status}`);
+      return { status };
+    });
+
+    // Пропущенную страницу можно вставить в середину, а снятые не в том порядке — переставить
+    await check('страницы: пропущенную страницу можно вставить в середину и переставить', true, async () => {
+      const { pageStarts: startsOf, pageOfMeasure, insertScorePage, moveScorePage } = await import('./js/score-pages.js');
+      const first = demoById('demo-ode-to-joy') || app.state.score;
+      app.openScore({ ...first, id: 'selfcheck-insert', title: 'Сборник (вставка)', pages: 1, pageStarts: [0] }, { source: 'omr' });
+      const page1Measures = app.state.score.measures.length;
+      // Сначала сняли третью страницу — она ушла в конец
+      const page3 = demoRecognitionScore('twoVoice');
+      assert(app.appendPage(page3).ok);
+      const afterThird = app.state.score;
+      assert.equal(afterThird.pages, 2);
+
+      // Потом нашли вторую и вставили её перед третьей (то есть в середину пьесы)
+      const page2 = demoRecognitionScore('noHarmony');
+      const inserted = app.appendPage(page2, { at: 1 });
+      assert(inserted.ok, inserted.reason || 'страница не вставилась');
+      assert.equal(inserted.at, 1, `вставка не на второе место: ${inserted.at}`);
+      const score = app.state.score;
+      assert.equal(score.pages, 3, `страниц: ${score.pages}`);
+      assert.equal(score.measures.length, page1Measures + page2.measures.length + page3.measures.length, 'такт потерялся');
+      assert.deepEqual(Array.from(startsOf(score)), [0, page1Measures, page1Measures + page2.measures.length], `границы страниц: ${startsOf(score)}`);
+      assert.equal(pageOfMeasure(score, page1Measures), 2, 'вставленная страница не стала второй');
+      assert.equal(score.measures[page1Measures].number, String(page1Measures + 1), 'нумерация тактов сбилась после вставки');
+
+      // Список страниц на экране «Минус»: видно такты каждой страницы, есть кнопки перестановки
+      const box = app.views.player.root.querySelector('#p-pages');
+      const rows = box.querySelectorAll('[data-page-row]');
+      assert.equal(rows.length, 3, `в списке страниц ${rows.length} строк`);
+      assert(/3 стр\./.test(box.textContent), `нет подписи о страницах: ${box.textContent.slice(0, 60)}`);
+
+      // Переставляем первую страницу вниз и проверяем, что порядок изменился
+      const beforeOrder = Array.from(startsOf(score));
+      const down = box.querySelector('[data-page-down="0"]');
+      assert(down, 'нет кнопки «ниже» у первой страницы');
+      down.click();
+      await sleep(60);
+      const moved = app.state.score;
+      assert.equal(moved.measures.length, score.measures.length, 'перестановка потеряла такты');
+      assert.notDeepEqual(Array.from(startsOf(moved)), beforeOrder, 'порядок страниц не изменился');
+      assert.equal(moved.pageStarts[0], 0);
+      assert.equal(pageOfMeasure(moved, 0), 1, 'нумерация страниц сбилась');
+      const status = app.views.player.root.querySelector('#p-pages').textContent;
+      assert(/3 стр\./.test(status), 'после перестановки потерялась подпись о страницах');
+
+      // Прямая проверка функции: перестановка на себя и неверная позиция не ломают пьесу
+      assert.equal(moveScorePage(moved, { from: 0, to: 0 }).moved, false);
+      assert.equal(moveScorePage(moved, { from: 9, to: 0 }).ok, false);
+      assert.equal(insertScorePage(moved, { measures: [] }).ok, false, 'пустая страница не вставляется');
+
+      // На экране «Сканировать» видно, куда встанет следующая страница
+      app.setView('scan');
+      const scan = app.views.scan;
+      scan.updateCurrentPiece();
+      const select = scan.root.querySelector('#insert-at');
+      const options = Array.from(select.options).map((option) => option.value);
+      assert.deepEqual(options, ['end', '0', '1', '2'], `варианты вставки: ${options.join(', ')}`);
+      assert(/В конец/.test(select.options[0].textContent), `первый вариант не «в конец»: ${select.options[0].textContent}`);
+      select.value = '2';
+      assert.equal(scan.insertAt(), 2, 'выбранная страница не читается');
+      select.value = 'end';
+      assert.equal(scan.insertAt(), null, '«в конец» должно давать null');
+      app.setView('player');
+      return {
+        pages: moved.pages,
+        measures: moved.measures.length,
+        starts: Array.from(startsOf(moved)),
+        orderBefore: beforeOrder,
+        insertOptions: options,
+        rowText: rows[0].textContent.replace(/\s+/g, ' ').trim(),
+      };
+    });
+
+    // Готовые теги: класс, жанр, задание — ставятся одним нажатием
+    await check('готовые теги в библиотеке ставятся одним нажатием', true, async () => {
+      const { suggestedTags } = await import('./js/library-index.js');
+      const score = { ...(demoById('demo-ode-to-joy') || app.state.score), id: 'selfcheck-presets', title: 'Пьеса для тегов', tags: [], savedAt: Date.now() };
+      await saveScore(score);
+      app.setView('library');
+      const view = app.views.library;
+      // Снимаем фильтры, оставшиеся от прошлой проверки: иначе новая пьеса просто не попадёт в список
+      view.tag = null;
+      view.query = '';
+      const searchBox = view.root.querySelector('#lib-search');
+      if (searchBox) searchBox.value = '';
+      await view.refresh();
+
+      const row = view.root.querySelector('#saved-list [data-tags="selfcheck-presets"]');
+      assert(row, 'нет строки пьесы с тегами');
+      const addButton = view.root.querySelector('#saved-list [data-add-tag="selfcheck-presets"]');
+      assert(addButton, 'нет кнопки добавления тега');
+      addButton.click();
+      await sleep(80);
+
+      const presets = view.root.querySelectorAll('#saved-list [data-preset-tag]');
+      assert(presets.length >= 5, `готовых тегов мало: ${presets.length}`);
+      const expected = Array.from(presets).map((chip) => chip.dataset.presetTag);
+      assert(expected.every((tag) => tag === tag.toLowerCase()), `подсказки должны быть в нижнем регистре: ${expected.join(', ')}`);
+
+      // Нажимаем первый готовый тег — он должен попасть в пьесу и нарисоваться как обычный тег
+      const chosen = presets[0].dataset.presetTag;
+      presets[0].click();
+      await sleep(120);
+      const saved = (await listScores()).find((s) => s.id === 'selfcheck-presets');
+      assert(saved && saved.tags.includes(chosen), `тег «${chosen}» не сохранился: ${JSON.stringify(saved?.tags)}`);
+      const chip = view.root.querySelector(`#saved-list [data-tags="selfcheck-presets"] .tag[data-tag="${chosen}"]`);
+      assert(chip, 'тег не показан в строке библиотеки');
+
+      // Повторная подсказка того же тега не появляется: предлагать уже поставленное незачем
+      view.root.querySelector('#saved-list [data-add-tag="selfcheck-presets"]').click();
+      await sleep(80);
+      const again = Array.from(view.root.querySelectorAll('#saved-list [data-preset-tag]')).map((chip2) => chip2.dataset.presetTag);
+      assert(!again.includes(chosen), `уже поставленный тег снова предлагается: ${again.join(', ')}`);
+      assert.equal(suggestedTags(saved).includes(chosen), false, 'подсказки не учли поставленный тег');
+      await deleteScore('selfcheck-presets');
+      return { presets: presets.length, chosen, savedTags: saved.tags, offeredAfter: again.length };
+    });
+
+    // Полный путь ученика: открыта пьеса → снимаем следующую страницу сборника → она приклеивается.
+    // Здесь работают настоящие камера-экран и настоящий сервис распознавания.
+    await check('сборник: страница со экрана сканирования приклеивается к открытой пьесе', false, async () => {
+      const first = demoById('demo-ode-to-joy') || app.state.score;
+      // source перезаписываем явно: у демо-пьесы он свой, а нам нужна пьеса «из снимка»
+      app.openScore(
+        { ...first, id: 'selfcheck-scan-pages', title: 'Сборник (съёмка)', pages: 1, pageStarts: [0], source: { kind: 'omr' } },
+        { source: 'omr' },
+      );
+      const before = app.state.score.measures.length;
+
+      app.setView('scan');
+      const scan = app.views.scan;
+      const row = scan.root.querySelector('#current-row');
+      assert(!row.hidden, 'нет подсказки о текущей пьесе на экране сканирования');
+      const box = scan.root.querySelector('#append-current');
+      assert(box.checked, 'галочка «приклеить страницу» не включилась для пьесы из снимка');
+
+      await scan.loadSamplePage();
+      await sleep(200);
+      assert(scan.imageBlob, 'демо-страница не загрузилась в экран сканирования');
+      assert(!scan.root.querySelector('#btn-recognize').disabled, 'кнопка распознавания выключена');
+      scan.root.querySelector('#btn-recognize').click();
+
+      // Ждём настоящее распознавание на сервере (homr ~7–10 с)
+      const deadline = Date.now() + 120000;
+      let text = '';
+      while (Date.now() < deadline) {
+        text = scan.result.textContent || '';
+        if (/Страница добавлена|не удалось|ошибка|Error/i.test(text)) break;
+        await sleep(400);
+      }
+      assert(/Страница добавлена/.test(text), `страница не приклеилась: ${text.slice(0, 200)}`);
+      const merged = app.state.score;
+      assert.equal(merged.id, 'selfcheck-scan-pages', 'пьеса потерялась при приклеивании');
+      assert.equal(merged.pages, 2, `страниц: ${merged.pages}`);
+      assert(merged.measures.length > before, `такты не добавились: ${merged.measures.length} против ${before}`);
+      assert.equal(merged.pageStarts.length, 2, 'не отмечена граница страницы');
+      return { before, after: merged.measures.length, pages: merged.pages, result: text.trim().slice(0, 80) };
+    });
+
+    await check('распознавание из MusicXML (эталонная страница)', true, async () => {
+      const score = demoRecognitionScore('noHarmony');
+      app.openScore(score, { source: 'omr' });
+      const acc = app.state.accompaniment;
+      assert(acc.events.length >= 4, `событий: ${acc.events.length}`);
+      return { measures: score.measures.length, events: acc.events.length };
+    });
+
+    await check('ручной ввод пьесы', true, async () => {
+      const score = scoreFromManualInput({ title: 'Проверка', chordsText: 'C | G7 | C | F', meterText: '3/4' });
+      app.openScore(score, { source: 'manual' });
+      assert(app.state.accompaniment.style === 'waltz', `стиль ${app.state.accompaniment.style}`);
+      assert(app.state.accompaniment.events.length === 12, `событий ${app.state.accompaniment.events.length}`);
+      return { style: app.state.accompaniment.style, events: app.state.accompaniment.events.length };
+    });
+
+    await check('подготовка снимка перед распознаванием (лист на столе)', true, async () => {
+      const { preprocessImageData } = await import('./js/image-prep.js');
+      // Рисуем «фото»: тёмный стол, светлый лист, линейки стана
+      const width = 300;
+      const height = 240;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'rgb(110,110,110)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = 'rgb(215,215,215)';
+      ctx.fillRect(40, 30, 220, 170);
+      ctx.fillStyle = 'rgb(40,40,40)';
+      for (let i = 0; i < 5; i += 1) ctx.fillRect(55, 60 + i * 12, 190, 4);
+      const frame = ctx.getImageData(0, 0, width, height);
+      const result = preprocessImageData(frame, { maxSide: 0 });
+      assert(result.stats.cropped, 'лист должен быть найден и обрезан');
+      assert(result.width < width && result.height < height, `размер не уменьшился: ${result.width}×${result.height}`);
+      assert(result.stats.after.inkRatio > 0.002, 'ноты должны остаться на странице');
+      return { size: `${result.width}×${result.height}`, steps: result.stats.steps.join(', ') };
+    });
+
+    await check('подготовка снимка: наклонное фото со тенью выпрямляется', true, async () => {
+      const { preprocessImageData } = await import('./js/image-prep.js');
+      // Рисуем «фото сборника на столе»: неравномерный свет, повёрнутый лист, тёмные линейки
+      const width = 420;
+      const height = 340;
+      const tilt = 6;
+      const pageWidth = 200;
+      const pageHeight = 140;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      const light = ctx.createLinearGradient(0, 0, width, height);
+      light.addColorStop(0, 'rgb(120,116,110)');
+      light.addColorStop(1, 'rgb(58,56,52)');
+      ctx.fillStyle = light;
+      ctx.fillRect(0, 0, width, height);
+      ctx.save();
+      ctx.translate(width / 2, height / 2);
+      ctx.rotate((tilt * Math.PI) / 180);
+      ctx.fillStyle = 'rgb(228,228,224)';
+      ctx.fillRect(-pageWidth / 2, -pageHeight / 2, pageWidth, pageHeight);
+      ctx.fillStyle = 'rgb(30,30,30)';
+      for (let i = 0; i < 3; i += 1) {
+        ctx.fillRect(-pageWidth / 2 + 20, -pageHeight / 2 + 34 + i * 30, pageWidth - 40, 7);
+      }
+      ctx.restore();
+
+      const frame = ctx.getImageData(0, 0, width, height);
+      const result = preprocessImageData(frame, { maxSide: 0 });
+      const steps = result.stats.steps.join(', ');
+      assert(result.stats.deskewed, `наклон должен быть исправлен (шаги: ${steps})`);
+      const found = result.stats.deskew?.tiltDeg ?? 0;
+      assert(Math.abs(found - tilt) < 2, `найден наклон ${found}° вместо ${tilt}°`);
+
+      // После выравнивания кадр — это уже сам лист: размер должен совпасть с листом, а не с фото
+      const aspect = result.width / result.height;
+      const expectedAspect = pageWidth / pageHeight;
+      assert(Math.abs(aspect - expectedAspect) / expectedAspect < 0.15, `пропорции страницы искажены: ${aspect.toFixed(2)} вместо ${expectedAspect.toFixed(2)}`);
+      assert(result.width < width && result.height < height, `страница не выделена из фото: ${result.width}×${result.height}`);
+
+      // Линейки должны стать горизонтальными: ищем самую тёмную строку в каждой колонке
+      const rows = [];
+      for (let x = Math.round(result.width * 0.25); x < result.width * 0.75; x += Math.max(1, Math.round(result.width / 16))) {
+        let bestRow = -1;
+        let best = 255;
+        for (let y = 0; y < result.height; y += 1) {
+          const value = result.data[(y * result.width + x) * 4];
+          if (value < best) {
+            best = value;
+            bestRow = y;
+          }
+        }
+        rows.push(bestRow);
+      }
+      const spread = Math.max(...rows) - Math.min(...rows);
+      assert(spread <= 4, `линейки остались наклонными: разброс ${spread} строк`);
+
+      // Все линейки на месте: тёмные пиксели занимают большую часть ширины страницы
+      let inkMinX = result.width;
+      let inkMaxX = -1;
+      for (let x = 0; x < result.width; x += 1) {
+        for (let y = 0; y < result.height; y += 1) {
+          if (result.data[(y * result.width + x) * 4] < 90) {
+            if (x < inkMinX) inkMinX = x;
+            if (x > inkMaxX) inkMaxX = x;
+            break;
+          }
+        }
+      }
+      const inkShare = (inkMaxX - inkMinX) / result.width;
+      assert(inkShare > 0.6, `страница обрезана: линейки занимают ${(inkShare * 100).toFixed(0)}% ширины`);
+
+      // Тень больше не давит на одну сторону страницы: бумага ровная слева и справа
+      const paperLevel = (from, to) => {
+        let best = 0;
+        for (let x = Math.round(result.width * from); x < result.width * to; x += 1) {
+          for (let y = 0; y < result.height; y += 1) {
+            const value = result.data[(y * result.width + x) * 4];
+            if (value > best) best = value;
+          }
+        }
+        return best;
+      };
+      const leftLevel = paperLevel(0.02, 0.15);
+      const rightLevel = paperLevel(0.85, 0.98);
+      assert(Math.abs(leftLevel - rightLevel) < 60, `свет остался неровным: слева ${leftLevel}, справа ${rightLevel}`);
+
+      return { tilt: `${found}°`, size: `${result.width}×${result.height}`, spread, inkShare: Number(inkShare.toFixed(2)), light: `${leftLevel}/${rightLevel}`, steps };
+    });
+
+    await check('правка распознавания: подсказки и исправления', true, async () => {
+      const { suggestFixes, autoRepairScore } = await import('./js/score-fixes.js');
+      const broken = {
+        title: 'Черновая пьеса',
+        tempo: 100,
+        meter: { beats: 3, beatType: 8 },
+        key: { tonic: 'G', mode: 'major', fifths: 1 },
+        source: { kind: 'omr', engine: 'homr' },
+        warnings: [],
+        measures: [
+          { number: '1', meter: { beats: 3, beatType: 8 }, events: [{ beat: 0, dur: 0.75, pitches: [67] }, { beat: 0.75, dur: 0.75, pitches: [69] }] },
+          { number: '2', meter: { beats: 3, beatType: 8 }, events: [] },
+        ],
+      };
+      const ids = suggestFixes(broken).map((s) => s.id);
+      assert(ids.includes('to-six-eight'), 'нет подсказки про 6/8');
+      assert(ids.includes('drop-empty'), 'нет подсказки про пустой такт');
+      const repaired = autoRepairScore(broken);
+      assert(repaired.score.measures.length === 1, `тактов после авто-правки: ${repaired.score.measures.length}`);
+      const sixEight = suggestFixes(broken).find((s) => s.id === 'to-six-eight').apply(broken);
+      assert(sixEight.meter.beats === 6 && sixEight.meter.beatType === 8, 'размер не стал 6/8');
+      assert(sixEight.measures[0].events[0].dur === 1.5, 'длительности не удвоились');
+      app.openScore(repaired.score, { source: 'omr' });
+      return { suggestions: ids.join(', '), measures: repaired.score.measures.length, meter: `${sixEight.meter.beats}/${sixEight.meter.beatType}` };
+    });
+
+    // Проверки звука: банк сэмплов, кэш на устройстве и экспорт WAV тем же инструментом.
+    // Не критичные: если интернета нет, приложение честно играет встроенным синтезом.
+    let bankLoaded = 0;
+    await check('банк звуков: свободные банки описаны и доступны', false, async () => {
+      const { bankById, planLoad, noteFileName } = await import('./js/sampler.js');
+      const royal = planLoad(bankById('royal'));
+      const compact = planLoad(bankById('compact'));
+      assert(royal.count >= 10 && compact.count >= 10, `сэмплов в плане: рояль ${royal.count}, компакт ${compact.count}`);
+      assert(noteFileName(66, 'sharp') !== noteFileName(66, 'flat'), 'имена файлов в банках различаются (диез/бемоль)');
+      assert(royal.approxBytes > 1000000 && compact.approxBytes < royal.approxBytes, 'компактный банк должен быть легче рояля');
+
+      // Живая проверка: скачиваем один средний сэмпл каждого банка (не весь банк — это 3.6 МБ)
+      const probe = async (bank, midi) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20000);
+        try {
+          const response = await fetch(`${bank.base}/${noteFileName(midi, bank.naming)}.mp3`, { signal: controller.signal });
+          return response.ok ? response.status : `HTTP ${response.status}`;
+        } catch (error) {
+          return `нет связи (${error.name})`;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const royalStatus = await probe(bankById('royal'), 60);
+      const compactStatus = await probe(bankById('compact'), 60);
+      return {
+        royal: `${royal.count} сэмплов, ${royal.approxBytesText}, ответ ${royalStatus}`,
+        compact: `${compact.count} сэмплов, ${compact.approxBytesText}, ответ ${compactStatus}`,
+      };
+    }, { timeoutMs: 60000 });
+
+    await check('банк звуков: загруженный банк берётся из памяти без сети', false, async () => {
+      const { bankCacheInfo, clearBankCache } = await import('./js/storage.js');
+      const { bankById, formatBytes } = await import('./js/sampler.js');
+      const realFetch = window.fetch;
+      let bankRequests = 0;
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url.includes('tonejs-instruments') || url.includes('midi-js-soundfonts')) bankRequests += 1;
+        return realFetch(input, init);
+      };
+      try {
+        // Берём компактный банк: 1.2 МБ против 3.6 МБ у рояля — проверка кэша не должна
+        // зависеть от скорости GitHub (рояль на медленном канале качается около минуты).
+        await clearBankCache('compact');
+        const first = await app.setPianoBank('compact');
+        if (!first.ok) return { skipped: true, reason: first.reason || 'банк недоступен' };
+        bankLoaded = first.notes;
+        const fromNetwork = bankRequests;
+        assert(first.notes >= 10, `сэмплов загружено: ${first.notes}`);
+        assert(app.state.synth.engine === 'sample', 'движок не переключился на сэмплы');
+        assert(app.state.synth.anchorList.length === first.notes, 'опорные ноты и сэмплы разошлись');
+
+        const cached = await bankCacheInfo('compact');
+        assert(cached.notes === first.notes, `в памяти ${cached.notes} сэмплов вместо ${first.notes}`);
+
+        // Уходим на синтез и возвращаемся: второй раз сеть не нужна
+        await app.setPianoBank('tone');
+        bankRequests = 0;
+        const again = await app.setPianoBank('compact');
+        assert(again.ok, 'повторная загрузка из памяти не удалась');
+        assert(bankRequests === 0, `повторная загрузка сходила в сеть ${bankRequests} раз`);
+        assert(again.notes === first.notes, 'из памяти пришло другое число сэмплов');
+        return {
+          bank: bankById('compact').title,
+          notes: first.notes,
+          fromNetwork,
+          cached: `${cached.notes} сэмплов, ${formatBytes(cached.bytes)}`,
+          secondLoadRequests: bankRequests,
+        };
+      } finally {
+        window.fetch = realFetch;
+      }
+    }, { timeoutMs: 120000 });
+
+    await check('звук: экспорт WAV идёт тем же инструментом, что играет', false, async () => {
+      const { renderEvents } = await import('./js/wav-render.js');
+      const { ODE_TO_JOY_MUSICXML } = await import('./js/fixtures.js');
+      const { musicXmlToScore } = await import('./js/musicxml.js');
+      const { generateAccompaniment } = await import('./js/accompaniment.js');
+      const score = musicXmlToScore(ODE_TO_JOY_MUSICXML, { kind: 'demo' });
+      const accompaniment = generateAccompaniment(score, { style: 'auto', includeMelody: false, tempo: score.tempo });
+      const base = { events: accompaniment.events, tempo: score.tempo, totalBeats: accompaniment.totalBeats, volume: 0.9 };
+
+      const synth = app.state.synth;
+      const sampled = await renderEvents({ ...base, buffers: synth.getBuffers(), bankId: synth.bankId, synth });
+      const tone = await renderEvents(base);
+
+      assert(sampled.metrics.peak > 0.02, `тишина в файле: пик ${sampled.metrics.peak}`);
+      assert(sampled.metrics.nonSilentRatio > 0.5, 'меньше половины файла звучит');
+      assert(tone.metrics.peak > 0.02, 'встроенный синтез тоже должен звучать');
+      if (bankLoaded) {
+        assert(sampled.engine === 'sample', `экспорт пошёл не тем движком: ${sampled.engine}`);
+        assert(sampled.samples === bankLoaded, `в экспорт попало ${sampled.samples} сэмплов вместо ${bankLoaded}`);
+        assert(sampled.engineName !== tone.engineName, 'инструменты экспорта не различаются');
+      }
+      // Запись рояля богаче обертонами: проверяем не на слух, а по распределению энергии
+      const richer = sampled.bands.high + sampled.bands.mid > tone.bands.high + tone.bands.mid;
+      return {
+        sampled: { engine: sampled.engineName, samples: sampled.samples, peak: sampled.metrics.peak, bands: sampled.bands },
+        tone: { engine: tone.engineName, peak: tone.metrics.peak, bands: tone.bands },
+        richer,
+      };
+    });
+
+    await check('звук: выбор банка в настройках и возврат к синтезу', true, async () => {
+      const { bankById, describeBank } = await import('./js/sampler.js');
+      const result = await app.setPianoBank('tone');
+      assert(result.ok, 'не удалось вернуться к встроенному синтезу');
+      assert(app.state.settings.pianoBank === 'tone', 'настройка звука не сохранилась');
+      assert(app.state.synth.engine === 'tone', 'движок не вернулся к синтезу');
+      const info = app.soundInfo();
+      assert(info.samples === 0, 'после возврата остались сэмплы');
+
+      // Интерфейс экрана «Минус»: список банков и строка состояния
+      const select = document.querySelector('#p-bank');
+      assert(select, 'в интерфейсе нет выбора звука');
+      assert(select.options.length >= 3, `в списке ${select.options.length} банков`);
+      assert(select.value === 'tone', `выбран не тот банк: ${select.value}`);
+      const status = (document.querySelector('#p-bank-status')?.textContent || '').trim();
+      assert(status.length > 0, 'строка о звуке пустая');
+      return { bank: bankById(info.bankId).title, compact: describeBank('compact').bytes, status, options: select.options.length };
+    });
+
+    // Информационная проверка: настоящее распознавание реальной страницы нот через /api.
+    // Берём демо-страницу «Оды к радости» (её генерирует tools/make-demo-page.mjs):
+    // ожидаемый результат известен — 4 такта, D-dur, 15 нот, поэтому проверка содержательная.
+    await check('распознавание демо-страницы через /api/recognize', false, async () => {
+      const { recognizeImageBlob: recognize, scoreFromMusicXmlText } = await import('./js/recognition.js');
+      const page = await fetch('./demo/ode-page.png').catch(() => null);
+      if (!page || !page.ok) return { skipped: true, reason: 'демо-страница недоступна (node tools/make-demo-page.mjs)' };
+      const blob = await page.blob();
+      const response = await recognize(blob, { timeoutMs: 60000 });
+      if (!response.ok) return { skipped: true, reason: response.error, detail: (response.detail || '').slice(0, 120) };
+      const score = scoreFromMusicXmlText(response.musicxml, { engine: response.engine, kind: 'omr' });
+      const notes = score.measures.reduce((sum, m) => sum + m.events.reduce((n, e) => n + e.pitches.length, 0), 0);
+      assert(score.measures.length > 0, 'в ответе нет тактов');
+      assert(notes > 0, 'в ответе нет нот');
+      assert(score.key?.tonic === 'D', `тональность ${score.key?.tonic}, ожидалась D`);
+      return { engine: response.engine, key: `${score.key?.tonic} ${score.key?.mode}`, meter: `${score.meter.beats}/${score.meter.beatType}`, measures: score.measures.length, notes };
+    });
+
+    // Сценарий хостинга: приложение лежит на статическом хостинге, а сервис распознавания — на своём
+    // адресе. Проверяем настоящий кросс-доменный запрос (локально это другой порт: 8000 против 3030).
+    await check('распознавание через внешний адрес сервиса (как на хостинге)', false, async () => {
+      const { recognizeImageBlob: recognize, scoreFromMusicXmlText: parse, checkServer: ping, apiEndpoint: endpointOf } = await import('./js/recognition.js');
+      const direct = `http://${location.hostname}:8000`;
+      const health = await ping(direct, { timeoutMs: 6000 });
+      if (!health.ok) return { skipped: true, reason: `сервис ${direct} не отвечает (${health.error || health.status})` };
+
+      const before = app.state.settings.omrUrl;
+      app.updateSettings({ omrUrl: direct });
+      try {
+        // Адрес задаём через сам интерфейс экрана «Сканировать», а не в обход него
+        app.setView('scan');
+        const scan = app.views.scan;
+        const field = scan.root.querySelector('#omr-url');
+        assert(field, 'нет поля «адрес сервиса распознавания» на экране сканирования');
+        field.value = direct;
+        scan.root.querySelector('#btn-save-omr').click();
+        await sleep(80);
+        assert.equal(app.state.settings.omrUrl, direct, 'адрес сервиса не сохранился из интерфейса');
+        const statusText = scan.root.querySelector('#omr-status').textContent;
+        assert(statusText.includes(direct), `статус не показывает адрес: ${statusText}`);
+        scan.root.querySelector('#btn-check-omr').click();
+        const checkDeadline = Date.now() + 15000;
+        let checkText = '';
+        while (Date.now() < checkDeadline) {
+          checkText = scan.root.querySelector('#omr-status').textContent;
+          if (/отвечает|не отвечает/.test(checkText)) break;
+          await sleep(300);
+        }
+        assert(/отвечает/.test(checkText), `проверка связи не подтвердила сервис: ${checkText}`);
+
+        const page = await fetch('./demo/ode-page.png').catch(() => null);
+        if (!page || !page.ok) return { skipped: true, reason: 'демо-страница недоступна' };
+        const blob = await page.blob();
+        const response = await recognize(blob, { base: app.state.settings.omrUrl, timeoutMs: 90000 });
+        assert(response.ok, `внешний сервис не ответил: ${response.error} ${response.detail || ''}`);
+        const score = parse(response.musicxml, { engine: response.engine, kind: 'omr' });
+        assert(score.measures.length > 0, 'в ответе нет тактов');
+
+        // Доказательство, что запрос ушёл именно на внешний адрес, а не через свой /api
+        const endpoint = endpointOf('/recognize', direct);
+        const requests = performance.getEntriesByType('resource').map((e) => e.name);
+        const hit = requests.filter((url) => url.startsWith(endpoint));
+        assert(hit.length > 0, `запроса на ${endpoint} не было`);
+
+        return { endpoint, requests: hit.length, host: location.host, engine: response.engine, measures: score.measures.length, uiStatus: checkText.slice(0, 90) };
+      } finally {
+        app.updateSettings({ omrUrl: before });
+      }
+    });
+
+    const criticalFailed = results.filter((r) => r.critical && !r.ok);
+    const allCriticalOk = criticalFailed.length === 0;
+    document.title = allCriticalOk ? 'SELFCHECK: OK' : 'SELFCHECK: FAIL';
+    document.querySelector('#result').textContent = JSON.stringify(
+      {
+        verdict: allCriticalOk ? 'OK' : 'FAIL',
+        passed: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        userAgent: navigator.userAgent,
+        secureContext: window.isSecureContext,
+        results,
+      },
+      null,
+      2,
+    );
+  </script>
+</body>
+</html>

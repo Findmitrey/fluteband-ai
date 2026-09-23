@@ -1,0 +1,26 @@
+{
+  "name": "FluteBand AI — умный аккомпаниатор",
+  "short_name": "FluteBand AI",
+  "description": "Сканируйте бумажные ноты, получайте фортепианный минус, меняйте темп и тональность под свой инструмент.",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1120",
+  "theme_color": "#0f172a",
+  "categories": ["music", "education"],
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "Сканировать ноты", "url": "./index.html?view=scan" },
+    { "name": "Минус", "url": "./index.html?view=player" }
+  ]
+}
