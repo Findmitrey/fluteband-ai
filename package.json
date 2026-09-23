@@ -26,7 +26,8 @@
     "check:static": "node tools/static-check.mjs",
     "check:netlify": "node tools/static-check.mjs --prefix=/",
     "check:netlify:pretty": "node tools/static-check.mjs --prefix=/ --pretty-urls",
-    "pack:space": "node tools/pack-space.mjs"
+    "pack:space": "node tools/pack-space.mjs",
+    "pack:space:gradio": "node tools/pack-space-gradio.mjs"
   },
   "engines": {
     "node": ">=20"

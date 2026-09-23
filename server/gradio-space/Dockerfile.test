@@ -1,0 +1,43 @@
+# FluteBand AI — локальная проверка Gradio-пакета, «как на бесплатном тарифе» (2 ядра, 4 ГБ).
+#
+# Hugging Face собирает Gradio-пространство сам: ставит requirements.txt (pip) и packages.txt (apt) и
+# запускает app.py. Этот файл повторяет ту же сборку в Docker, чтобы проверить пакет до выкладки —
+# сам Hugging Face его не читает (имя не `Dockerfile`).
+#
+#   docker build -f dist-space-gradio/Dockerfile.test -t fluteband-gradio dist-space-gradio
+#   docker run --rm -p 7860:7860 --cpus=2 --memory=4g fluteband-gradio
+#   curl http://127.0.0.1:7860/health
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=7860 \
+    OMP_NUM_THREADS=2 \
+    RECOGNIZE_TIMEOUT=240 \
+    FLUTEBAND_WORK_DIR=/tmp/omr-work \
+    HF_HOME=/tmp/hf-cache
+
+WORKDIR /app
+
+# Системные библиотеки берём из того же packages.txt, что и настоящее пространство, и ставим ровно той же
+# командой, что Hugging Face («xargs -r -a packages.txt apt-get install -y»). Это важно: если в файле
+# окажется пояснение вместо имени пакета, xargs примет слова за пакеты и сборка упадёт с
+# «Unable to locate package #» — так и случилось на настоящем пространстве, потому что первая версия
+# этой проверки список библиотек дублировала, а packages.txt не читала вовсе.
+COPY packages.txt ./
+RUN apt-get update \
+    && xargs -r -a packages.txt apt-get install -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 7860
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s \
+    CMD python -c "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','7860')+'/health',timeout=4)"
+
+CMD ["python", "app.py"]

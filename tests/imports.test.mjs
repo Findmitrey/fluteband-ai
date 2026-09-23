@@ -332,3 +332,152 @@ test('сборка пакета добавляет заголовки хости
   // Служебные файлы хостинга не должны входить в хеш содержимого оболочки
   assert.ok(/_headers', '\.nojekyll'/.test(source), 'служебные файлы учитываются в хеше имени кэша');
 });
+
+// --- Сервис распознавания в бесплатном Gradio-пространстве -------------------------------
+// У Hugging Face бесплатными остались только Gradio-пространства (Docker требует платный план),
+// поэтому сервис собирается вторым пакетом: наш FastAPI монтируется внутрь Gradio-приложения.
+
+const SPACE = resolve(here, '..', 'server', 'gradio-space');
+const HOMR_MODELS = resolve(here, '..', 'server', 'deps', 'homr');
+
+test('Gradio-пространство: зависимости и шапка описывают бесплатный тариф', async () => {
+  const requirements = await readFile(join(SPACE, 'requirements.txt'), 'utf8');
+  assert.ok(/^gradio>=5/m.test(requirements), 'requirements.txt не ставит gradio — пространство не соберётся');
+  assert.ok(/^homr==0\.6\.2$/m.test(requirements), 'движок homr не закреплён за набором моделей (0.6.2 ждёт модели 331, 0.7.0 — 396)');
+  assert.ok(/^fastapi/m.test(requirements), 'requirements.txt не ставит fastapi');
+  assert.ok(/^python-multipart/m.test(requirements), 'requirements.txt не ставит python-multipart: не принять фото');
+  assert.ok(/^uvicorn/m.test(requirements), 'requirements.txt не ставит uvicorn');
+
+  const packages = await readFile(join(SPACE, 'packages.txt'), 'utf8');
+  for (const lib of ['libgl1', 'libglib2.0-0', 'libxcb1']) {
+    assert.ok(new RegExp(`^${lib}$`, 'm').test(packages), `packages.txt не ставит ${lib}: OpenCV не заработает`);
+  }
+  // Hugging Face ставит этот файл командой «xargs -r -a packages.txt apt-get install -y»: каждое слово
+  // становится именем пакета. Пояснение на русском превратилось в пакеты «#», «FluteBand», «AI» и уронило
+  // настоящую сборку пространства («Unable to locate package #»), поэтому здесь только имена пакетов.
+  for (const [index, line] of packages.split('\n').entries()) {
+    const text = line.trim();
+    if (!text) continue;
+    assert.ok(/^[a-z0-9][a-z0-9+._-]*$/.test(text),
+      `packages.txt, строка ${index + 1}: «${text}» — не имя пакета; пояснения тут запрещены (файл читает xargs)`);
+  }
+  // Локальная проверка обязана ставить те же пакеты из того же файла, иначе она такую ошибку не поймает
+  const dockerTest = await readFile(join(SPACE, 'Dockerfile.test'), 'utf8');
+  assert.ok(/xargs -r -a packages\.txt apt-get install/.test(dockerTest),
+    'Dockerfile.test не читает packages.txt: ошибки в этом файле пройдут мимо локальной проверки');
+
+  const packer = await readFile(resolve(here, '..', 'tools', 'pack-space-gradio.mjs'), 'utf8');
+  assert.ok(/^sdk: gradio$/m.test(packer), 'пакет собирается не как Gradio-пространство');
+  assert.ok(!/^\s*sdk: docker$/m.test(packer), 'пакет собирается как Docker-пространство — это платный план');
+  assert.ok(/^app_file: app\.py$/m.test(packer), 'в шапке пространства не указан app_file');
+  assert.ok(/^app_port: \$\{PORT\}$/m.test(packer), 'в шапке пространства не указан app_port');
+  assert.ok(/models\/\*\.onnx filter=lfs/.test(packer), 'модели не уезжают через git-lfs: Hugging Face не примет файлы >10 МБ');
+});
+
+test('Gradio-пространство: пакет собирается и проходит собственную проверку', async (t) => {
+  const modelDir = join(HOMR_MODELS, 'segmentation');
+  const hasModels = await stat(join(modelDir, 'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx'))
+    .then(() => true).catch(() => false);
+  if (!hasModels) {
+    // Модели движка лежат в server/deps (он не в репозитории): на чистом клоне их сначала надо скачать
+    // командой «python -c "from homr.main import main; main()" --init --gpu no»
+    t.skip('нет процессорного набора моделей движка (server/deps/homr) — сборку проверять не на чем');
+    return;
+  }
+
+  const out = join(resolve(here, '..'), '.omr-work', 'space-gradio-test');
+  const { execFileSync } = await import('node:child_process');
+  const stdout = execFileSync(process.execPath, [resolve(here, '..', 'tools', 'pack-space-gradio.mjs'), `--out=${out}`], {
+    encoding: 'utf8',
+  });
+  assert.ok(/Готово: /.test(stdout), 'сборщик не сообщил об успехе');
+
+  const files = [];
+  const walk = async (dir, base = dir) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full, base);
+      else files.push(full.slice(base.length + 1).split('\\').join('/'));
+    }
+  };
+  await walk(out);
+
+  for (const needed of ['app.py', 'requirements.txt', 'packages.txt', 'README.md', '.gitattributes', 'Dockerfile.test']) {
+    assert.ok(files.includes(needed), `в пакете нет ${needed}`);
+  }
+  for (const module of ['service/main.py', 'service/engines.py', 'service/melody.py']) {
+    assert.ok(files.includes(module), `в пакете нет ${module}`);
+  }
+  assert.ok(files.some((file) => file.startsWith('examples/')), 'в пакете нет примера страницы для вкладки App');
+  assert.ok(!files.includes('Dockerfile'), 'в пакет попал Dockerfile: Hugging Face примет его за Docker-пространство');
+  assert.ok(!files.some((file) => file.startsWith('service/deps/')), 'в пакет попали локальные пакеты server/deps');
+
+  // Модели: ровно набор той версии движка, что закреплена в requirements.txt. На Python 3.10 (базовый
+  // образ Gradio-пространства) pip ставит homr 0.6.2, и он ждёт модели 331; 0.7.0 ждёт 396 — замерено
+  // запуском обеих версий: с набором не той версии движок скачивает своё прямо во время запроса.
+  const models = files.filter((file) => file.startsWith('models/'));
+  const kinds = models
+    .map((file) => {
+      const name = file.split('/')[1];
+      for (const kind of ['segnet', 'encoder', 'decoder']) {
+        if (name.startsWith(`${kind}_`)) return kind;
+      }
+      return name;
+    })
+    .sort();
+  assert.deepEqual(kinds, ['decoder', 'encoder', 'segnet'], `неожиданный набор моделей в пакете: ${models.join(', ')}`);
+  assert.ok(!models.some((file) => file.includes('_fp16')), 'в пакете лежит набор fp16, а пространство работает на процессоре');
+  assert.ok(models.every((file) => !file.includes('_396')), 'в пакете набор моделей 396 (homr 0.7.0), а закреплён движок 0.6.2 с моделями 331');
+  assert.ok(models.some((file) => file.includes('encoder_pytorch_model_331')), 'в пакете нет энкодера 331 — движок скачает его сам');
+  const packedRequirements = await readFile(join(out, 'requirements.txt'), 'utf8');
+  assert.ok(/^homr==0\.6\.2$/m.test(packedRequirements), 'версия движка в пакете не закреплена за набором моделей');
+
+  const readme = await readFile(join(out, 'README.md'), 'utf8');
+  assert.ok(/^sdk: gradio$/m.test(readme), 'шапка пакета не Gradio');
+  assert.ok(/^app_file: app\.py$/m.test(readme), 'шапка пакета не указывает app.py');
+  assert.ok(/^app_port: 7860$/m.test(readme), 'шапка пакета не указывает порт 7860');
+  assert.ok(/git-lfs/.test(readme), 'в описании пространства не сказано, как уезжают модели');
+
+  const attributes = await readFile(join(out, '.gitattributes'), 'utf8');
+  assert.ok(/^models\/\*\.onnx filter=lfs/m.test(attributes), 'нет правила git-lfs для моделей');
+
+  const { rm } = await import('node:fs/promises');
+  await rm(out, { recursive: true, force: true });
+});
+
+test('Gradio-пространство: набор моделей сверяется с версией движка, распознавания идут очередью', async () => {
+  const app = await readFile(join(SPACE, 'app.py'), 'utf8');
+  assert.ok(/mount_gradio_app\(api, demo, path="\/"\)/.test(app), 'FastAPI не смонтирован в Gradio: маршруты сервиса пропадут');
+  assert.ok(/uvicorn\.run\(app, host="0\.0\.0\.0"/.test(app), 'сервис слушает не 0.0.0.0 — в облаке он будет недоступен');
+  assert.ok(/models\/\*\.onnx|MODELS\.glob/.test(app), 'app.py не раскладывает модели из репозитория в пакет движка');
+  // Набор моделей задаётся соответствием «версия движка + файлы в models/», а не переменной окружения:
+  // у homr 0.6.2 (Python 3.10) флага --gpu нет вовсе, поэтому ключ FLUTEBAND_HOMR_GPU=no тут был бы
+  // пустой надеждой. Вместо него — сверка с тем, что движок ищет на самом деле.
+  assert.ok(!/FLUTEBAND_HOMR_GPU=", "no|FLUTEBAND_HOMR_GPU", "no"/.test(app), 'app.py снова «фиксирует» набор моделей ключом, которого движок не понимает');
+  assert.ok(/def check_models\(/.test(app), 'app.py не сверяет набор моделей с тем, что ждёт версия движка');
+  assert.ok(/MODELS_CHECK\["missing"\]/.test(app), 'расхождение моделей не попадает в журнал пространства');
+  assert.ok(/segnet_path_onnx/.test(app) && /default_config\.filepaths/.test(app), 'сверка не спрашивает у движка, какие файлы он ждёт');
+  // Прогрев — только чтение моделей с диска: полное пробное распознавание заняло бы очередь и
+  // задержало первый запрос ученика (измерено: 53 с против 28 с)
+  assert.ok(/def warmup\(\)/.test(app) && /warmup\(\)\n    uvicorn\.run/.test(app), 'модели не прогреваются до старта сервиса');
+  assert.ok(!/Thread\(target=warmup/.test(app), 'прогрев снова запускает распознавание: он задержит первый запрос');
+  assert.ok(/recognize-\{int\(time\.time\(\)/.test(app), 'результат страницы Gradio пишется под одним именем — запросы затрут друг друга');
+
+  const engines = await readFile(resolve(here, '..', 'server', 'engines.py'), 'utf8');
+  assert.ok(/^import threading$/m.test(engines), 'в движках нет threading — нечем выстроить очередь');
+  assert.ok(/_RECOGNIZE_LOCK = threading\.Lock\(\)/.test(engines), 'нет очереди распознавания');
+  assert.ok(/with _RECOGNIZE_LOCK:/.test(engines), 'распознавание не берёт очередь');
+  // Флаг --gpu есть только у homr 0.7.0+: спрашиваем у движка и передаём флаг лишь тогда, когда он его знает
+  assert.ok(/def _gpu_flag_supported\(\)/.test(engines), 'движок не проверяет, знает ли установленный homr флаг --gpu');
+  assert.ok(/from homr\.main import GpuSupport/.test(engines), 'проверка флага не спрашивает сам движок');
+  assert.ok(/_gpu_flag_supported\(\)/.test(engines) && /command \+= \["--gpu", requested_gpu\]/.test(engines), 'выбор набора моделей не доходит до homr');
+  assert.ok(/unsupported_gpu_modes/.test(engines), 'если ключ не применён, об этом не сообщается в предупреждениях');
+
+  const pkg = JSON.parse(await readFile(resolve(here, '..', 'package.json'), 'utf8'));
+  assert.ok(pkg.scripts['pack:space:gradio'], 'в package.json нет команды сборки Gradio-пакета');
+  assert.ok(pkg.scripts['pack:space'], 'пропала команда сборки Docker-пакета');
+
+  const ignore = await readFile(resolve(here, '..', '.gitignore'), 'utf8');
+  assert.ok(/^dist-space-gradio\/$/m.test(ignore), 'собранный Gradio-пакет не исключён из репозитория');
+  assert.ok(/^server\/deps-gradio\/$/m.test(ignore), 'локальный gradio не исключён из репозитория');
+});

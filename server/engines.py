@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,9 @@ DEFAULT_FIXTURE = FIXTURES / "ode-to-joy.musicxml"
 
 # Каталог для временных файлов движков: держим внутри проекта, чтобы не зависеть от прав на %TEMP%
 WORK_ROOT = Path(os.environ.get("FLUTEBAND_WORK_DIR", SERVER_DIR.parent / ".omr-work"))
+
+# Очередь распознавания: движок процессорный, ядер на бесплатном тарифе два (см. recognize_bytes)
+_RECOGNIZE_LOCK = threading.Lock()
 
 ENGINE_INFO = {
     "stub": {"license": "—", "note": "эталонный MusicXML для проверки тракта", "verified": True},
@@ -133,6 +137,28 @@ def _run(command: list[str], work_dir: Path, timeout: int) -> subprocess.Complet
     )
 
 
+_GPU_FLAG_SUPPORTED: bool | None = None
+
+
+def _gpu_flag_supported() -> bool:
+    """Знает ли установленный движок homr флаг `--gpu` (он появился в 0.7.0).
+
+    Ответ зависит от версии, а версия — от версии Python (3.10 → 0.6.2, 3.11 → 0.7.0), поэтому
+    спрашиваем один раз и запоминаем: проверка стоит одного запуска Python. Раньше флаг передавался
+    всегда, и на 0.6.2 он молча ничего не делал — выбор набора моделей там определяет сама версия.
+    """
+    global _GPU_FLAG_SUPPORTED
+    if _GPU_FLAG_SUPPORTED is None:
+        probe = subprocess.run(
+            [sys.executable, "-c", "from homr.main import GpuSupport"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _GPU_FLAG_SUPPORTED = probe.returncode == 0
+    return _GPU_FLAG_SUPPORTED
+
+
 def run_engine(engine: str, image_path: Path, work_dir: Path, timeout: int = 180, mode: str = "full") -> dict:
     """Распознать изображение и вернуть {'ok', 'musicxml', 'engine', 'warnings', 'error', 'elapsedMs'}.
 
@@ -174,6 +200,7 @@ def run_engine(engine: str, image_path: Path, work_dir: Path, timeout: int = 180
         }
 
     melody_meta: dict | None = None
+    unsupported_gpu_modes: list[str] = []
     try:
         if engine == "oemer":
             command = [sys.executable, "-m", "oemer.ete", str(image_path), "-o", str(work_dir / "out")]
@@ -191,7 +218,19 @@ def run_engine(engine: str, image_path: Path, work_dir: Path, timeout: int = 180
                     target = Path(melody_meta["stripPath"])
                 else:
                     melody_meta = {**melody_meta, "fallback": True}
-            command = [sys.executable, "-c", "from homr.main import main; main()", str(target)]
+            command = [sys.executable, "-c", "from homr.main import main; main()"]
+            # Флаг выбора моделей (--gpu no|auto|force) есть только у homr 0.7.0 и новее; у 0.6.2, который
+            # ставится на Python 3.10 (то есть в Gradio-пространстве Hugging Face), его нет, и лишний
+            # аргумент там ничего не значит. Поэтому спрашиваем у установленного движка, знает ли он флаг:
+            # иначе на 0.6.2 мы бы только делали вид, что фиксируем набор моделей.
+            requested_gpu = (os.environ.get("FLUTEBAND_HOMR_GPU") or "").strip().lower()
+            if requested_gpu:
+                if requested_gpu in ("no", "auto", "force") and _gpu_flag_supported():
+                    command += ["--gpu", requested_gpu]
+                else:
+                    # Ключ задан, но применить его нельзя — это должно быть видно, а не потеряться молча
+                    unsupported_gpu_modes.append(requested_gpu)
+            command.append(str(target))
             result = _run(command, work_dir, timeout)
             found = _find_musicxml(work_dir, target.with_suffix(".musicxml"))
         else:  # audiveris
@@ -228,6 +267,11 @@ def run_engine(engine: str, image_path: Path, work_dir: Path, timeout: int = 180
         warnings.append("homr не сообщает уверенность — проверьте ноты на экране перед игрой")
     elif engine == "oemer":
         warnings.append("oemer помечен как непроверенный: возможна несовместимость с onnxruntime")
+    if unsupported_gpu_modes:
+        warnings.append(
+            f"выбор моделей «{unsupported_gpu_modes[0]}» не применён: у этой версии движка homr нет такого "
+            "флага — набор моделей задаёт сама версия движка"
+        )
 
     used_mode = "full"
     melody_out: dict | None = None
@@ -259,14 +303,22 @@ def run_engine(engine: str, image_path: Path, work_dir: Path, timeout: int = 180
 
 
 def recognize_bytes(engine: str, image_bytes: bytes, timeout: int = 180, mode: str = "full") -> dict:
-    """Распознать изображение из памяти (для сервиса). Работает во временном каталоге."""
-    work_dir = WORK_ROOT / f"job-{int(time.time() * 1000)}"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    image_path = work_dir / "page.png"
-    if image_bytes[:3] == b"\xff\xd8\xff":
-        image_path = work_dir / "page.jpg"
-    image_path.write_bytes(image_bytes)
-    try:
-        return run_engine(engine, image_path, work_dir, timeout=timeout, mode=mode)
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+    """Распознать изображение из памяти (для сервиса). Работает во временном каталоге.
+
+    Запросы выстраиваются в очередь: движок считает на процессоре и на бесплатном тарифе получает всего
+    два ядра, поэтому два одновременных распознавания только мешали бы друг другу. Проверено на
+    Gradio-пространстве: если первый запрос совпадал с прогревом движка, а моделей в образе не хватало,
+    оба запуска скачивали один и тот же архив моделей и один из них падал с «FileNotFoundError» на
+    середине распаковки. Очередь убирает и гонку, и борьбу за ядра.
+    """
+    with _RECOGNIZE_LOCK:
+        work_dir = WORK_ROOT / f"job-{int(time.time() * 1000)}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        image_path = work_dir / "page.png"
+        if image_bytes[:3] == b"\xff\xd8\xff":
+            image_path = work_dir / "page.jpg"
+        image_path.write_bytes(image_bytes)
+        try:
+            return run_engine(engine, image_path, work_dir, timeout=timeout, mode=mode)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)

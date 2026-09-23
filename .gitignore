@@ -9,13 +9,16 @@ package-lock.json
 .omr-work/
 .piptmp/
 server/deps/
+# локальные зависимости для проверки Gradio-пространства (gradio ставится только ради этого теста)
+server/deps-gradio/
 
 # готовые звуковые файлы для прослушивания (создаются npm run render:wav)
 artifacts/
 
-# собранные пакеты для хостинга (создаются npm run build:static / npm run pack:space)
+# собранные пакеты для хостинга (создаются npm run build:static / npm run pack:space[:gradio])
 dist/
 dist-space/
+dist-space-gradio/
 
 # Python
 __pycache__/
@@ -29,3 +32,7 @@ venv/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ваши сканы из папки «Ноты для проверок» (материал сборников — не для публикации в репозитории).
+# Нужны в репозитории — уберите эту строку, но помните про авторские права сборника.
+Ноты для проверок/

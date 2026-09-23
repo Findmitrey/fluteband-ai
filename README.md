@@ -91,13 +91,14 @@ Dev-сервер печатает LAN-адрес (`http://192.168.x.x:3030`). У
 
 ## Выложить в интернет (бесплатно)
 
-Приложение — статика, сервис распознавания — Docker-контейнер; у каждого своя бесплатная площадка.
+Приложение — статика, сервис распознавания — небольшое Python-приложение; у каждого своя бесплатная площадка.
 
 ```bash
-npm run build:static     # → dist/       (46 файлов, 0.44 МБ) для Netlify, Cloudflare Pages или GitHub Pages
-npm run check:static     # проверка как на хостинге: подкаталог, service worker, офлайн без сети
-npm run check:netlify    # то же для корня сайта (Netlify, Cloudflare Pages)
-npm run pack:space       # → dist-space/ (сервер + Dockerfile + шапка Spaces) для Hugging Face Spaces
+npm run build:static        # → dist/               (46 файлов, 0.45 МБ) для Netlify, Cloudflare Pages или GitHub Pages
+npm run check:static        # проверка как на хостинге: подкаталог, service worker, офлайн без сети
+npm run check:netlify       # то же для корня сайта (Netlify, Cloudflare Pages)
+npm run pack:space:gradio   # → dist-space-gradio/  сервис для бесплатного Gradio-пространства Hugging Face
+npm run pack:space          # → dist-space/         тот же сервис как Docker-образ (платный план или иной хостинг)
 ```
 
 - Сборка приложения не пропустит путь от корня сайта и расхождение с офлайн-оболочкой; имя кэша оболочки
@@ -106,13 +107,23 @@ npm run pack:space       # → dist-space/ (сервер + Dockerfile + шапк
   его отдаёт GitHub Pages, и прогоняет офлайн-проверку на этот адрес: приложение открывается с выключенной сетью.
   `npm run check:netlify` проверяет корень сайта, `npm run check:netlify:pretty` — ещё и худший случай
   Netlify: главная страница отдаётся перенаправлением, но офлайн-кэш всё равно собирается целиком.
-- Образ сервиса ставит движок `homr`, скачивает его модели на сборке (`homr --init`) и добавляет системные
-  библиотеки для OpenCV — без них распознавание в контейнере падало.
+- **Сервис выкладывается бесплатно как Gradio-пространство**: Docker-пространства у Hugging Face стали
+  платными, а Gradio остались бесплатными. Внутрь Gradio-страницы монтируется наш FastAPI, поэтому
+  `/health`, `/engines` и `/recognize` — те же, что у Docker-варианта. Три модели движка (150 МБ) лежат
+  в репозитории пространства через git-lfs: диск там непостоянный, а скачивание моделей во время запроса
+  ломало распознавание, если рядом шёл второй запрос. Набор моделей соответствует **закреплённой версии**
+  движка (`homr==0.6.2`: в базовом образе пространства Python 3.10, а ему нужны модели 331, не 396), и при
+  старте пространство сверяет набор с ожиданиями движка. Проверено запуском сервиса с выключенной сетью —
+  скачиваний нет.
+- Docker-вариант (`npm run pack:space`) сохранён: он ставит движок `homr`, скачивает его модели на сборке
+  (`homr --init`) и добавляет системные библиотеки для OpenCV — без них распознавание в контейнере падало.
+  Пригодится с платным планом Hugging Face, на Render или Fly.io.
 
 Пошаговая инструкция (что нажимать, что проверить после выкладки) — `docs/05-publikaciya.md`.
-Самая короткая дорога: открыть <https://app.netlify.com/drop> и перетащить туда содержимое `dist/`
-(в репозитории уже лежит `netlify.toml`: сборка `npm run build:static`, папка публикации `dist`,
-«красивые адреса» выключены, service worker отдаётся без кэша).
+Самая короткая дорога для приложения: открыть <https://app.netlify.com/drop> и перетащить туда содержимое
+`dist/` (в репозитории уже лежит `netlify.toml`: сборка `npm run build:static`, папка публикации `dist`,
+«красивые адреса» выключены, service worker отдаётся без кэша); для сервиса — создать пространство с
+**SDK: Gradio** и загрузить в него `dist-space-gradio/`.
 
 ## Боевое распознавание нот (бесплатно)
 
@@ -187,14 +198,16 @@ npm run render:wav
 ```bash
 npm run build:static        # 1. Приложение: собрать dist/ и проверить его как на хостинге
 npm run check:static
-npm run pack:space          # 2. Сервис: собрать dist-space/ с Dockerfile и шапкой Spaces
+npm run pack:space:gradio   # 2. Сервис: собрать dist-space-gradio/ (бесплатное Gradio-пространство)
+npm run pack:space          #    либо dist-space/ (Docker — для платного плана или другого хостинга)
 # 3. В приложении откройте «Сканировать» → «Сервис распознавания» и впишите адрес сервиса:
 #    https://ваш-сервис.example.com  → кнопка «Проверить связь» покажет, отвечает ли он
 ```
 
 Площадки (все бесплатные, без карты): приложение — **Netlify** (самое простое: перетащить содержимое
 `dist/` на <https://app.netlify.com/drop>), **Cloudflare Pages** (корень сайта) или **GitHub Pages**
-(подкаталог `имя.github.io/fluteband/`); сервис — **Hugging Face Spaces** (`dist-space/`, Docker, Free CPU).
+(подкаталог `имя.github.io/fluteband/`); сервис — **Hugging Face Spaces** с **SDK: Gradio**
+(`dist-space-gradio/`; Docker там требует платного плана, `dist-space/` для него сохранён).
 В репозитории лежит `netlify.toml`, поэтому выкладка из репозитория настраивается сама: сборка
 `npm run build:static`, папка публикации `dist`. Подробно, по шагам и с чек-листом после выкладки —
 `docs/05-publikaciya.md`.
@@ -247,6 +260,8 @@ tools/                  dev-сервер, проверка OMR, стенды т�
   static-check.mjs        проверка пакета так, как его отдаёт хостинг: подкаталог (GitHub Pages),
                           корень сайта (Netlify, Cloudflare Pages) и «красивые адреса» Netlify
   pack-space.mjs          сборка dist-space/ для Hugging Face Spaces (сервер + Dockerfile + шапка Spaces)
+  pack-space-gradio.mjs   сборка dist-space-gradio/ для бесплатного Gradio-пространства (те же маршруты,
+                          внутрь Gradio монтируется наш FastAPI; модели движка уезжают через git-lfs)
   render-demo-wav.mjs     отрисовка минуса в WAV двумя инструментами (для прослушивания)
 tests/                  юнит-тесты (node:test)
 docs/                   вопросы, решения, архитектура, статус, отчёты по точности
