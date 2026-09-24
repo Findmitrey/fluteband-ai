@@ -365,6 +365,14 @@ test('Gradio-пространство: зависимости и шапка оп
   const dockerTest = await readFile(join(SPACE, 'Dockerfile.test'), 'utf8');
   assert.ok(/xargs -r -a packages\.txt apt-get install/.test(dockerTest),
     'Dockerfile.test не читает packages.txt: ошибки в этом файле пройдут мимо локальной проверки');
+  // …и повторять условия облака, в которых ошибки и живут: Python 3.10.13 (там homr 0.6.2 и другой набор
+  // моделей) и серверный рендеринг Gradio (из-за него порт 7860 занимает Node-сервер)
+  assert.ok(/FROM python:3\.10\.13-slim/.test(dockerTest),
+    'Dockerfile.test собран не на Python 3.10.13, как в облаке: версия движка и набор моделей будут другими');
+  assert.ok(/GRADIO_SSR_MODE=true/.test(dockerTest),
+    'Dockerfile.test без GRADIO_SSR_MODE: локальная проверка не воспроизведёт облачную ошибку с портом 7860');
+  assert.ok(/apt-get install -y nodejs/.test(dockerTest), 'Dockerfile.test не ставит Node 20, нужный серверному рендерингу');
+  assert.ok(/pip install --no-cache-dir spaces/.test(dockerTest), 'Dockerfile.test не ставит пакет spaces: проверка не повторит среду ZeroGPU');
 
   const packer = await readFile(resolve(here, '..', 'tools', 'pack-space-gradio.mjs'), 'utf8');
   assert.ok(/^sdk: gradio$/m.test(packer), 'пакет собирается не как Gradio-пространство');
@@ -447,7 +455,20 @@ test('Gradio-пространство: пакет собирается и про
 
 test('Gradio-пространство: набор моделей сверяется с версией движка, распознавания идут очередью', async () => {
   const app = await readFile(join(SPACE, 'app.py'), 'utf8');
-  assert.ok(/mount_gradio_app\(api, demo, path="\/"\)/.test(app), 'FastAPI не смонтирован в Gradio: маршруты сервиса пропадут');
+  assert.ok(/mount_gradio_app\(api, demo, path="\/", ssr_mode=False\)/.test(app),
+    'страница Gradio монтируется с серверным рендерингом: Gradio поднимет Node-сервер, тот займёт порт 7860 и сервис не запустится');
+  assert.ok(/не удалось занять порт/.test(app), 'неудачный захват порта не объясняется в журнале');
+  // Железо: сервис процессорный (движок homr на ONNX), поэтому пространству подходит CPU basic. Среда
+// ZeroGPU отказывается запускать пространство без функции с @spaces.GPU среди обработчиков страницы
+// («No @spaces.GPU function detected during startup»): декоратор ставит обёртке атрибут `zerogpu`
+// (spaces/zero/decorator.py), и среда видит его в `blocks.fns[*].fn` — проверено в образе с
+// SPACES_ZERO_GPU=true. Объявленная в модуле функция не помогла, потому что её не было среди обработчиков.
+  assert.ok(/@spaces\.GPU\s*\ndef service_state/.test(app), 'нет пометки @spaces.GPU на обработчике страницы: среда ZeroGPU не запустит пространство');
+  assert.ok(/fn=service_state/.test(app), 'помеченная функция не отдана Gradio: среда ищет пометку в blocks.fns[*].fn');
+  assert.ok(!/@spaces\.GPU\s*\ndef recognize_from_ui/.test(app), 'распознавание помечено @spaces.GPU — оно считает на процессоре');
+  assert.ok(/class _SpacesOnCpu/.test(app), 'нет замены пакета spaces для процессорного железа: @spaces.GPU уронит сервис без пакета');
+  assert.ok(/import spaces[\s\S]{0,300}ZERO_GPU = True/.test(app), 'импорт spaces не защищён — на процессорном железе сервис упадёт');
+  assert.ok(/ZERO_GPU/.test(app), 'в журнале не видно, на каком железе работает пространство');
   assert.ok(/uvicorn\.run\(app, host="0\.0\.0\.0"/.test(app), 'сервис слушает не 0.0.0.0 — в облаке он будет недоступен');
   assert.ok(/models\/\*\.onnx|MODELS\.glob/.test(app), 'app.py не раскладывает модели из репозитория в пакет движка');
   // Набор моделей задаётся соответствием «версия движка + файлы в models/», а не переменной окружения:
@@ -459,7 +480,9 @@ test('Gradio-пространство: набор моделей сверяет�
   assert.ok(/segnet_path_onnx/.test(app) && /default_config\.filepaths/.test(app), 'сверка не спрашивает у движка, какие файлы он ждёт');
   // Прогрев — только чтение моделей с диска: полное пробное распознавание заняло бы очередь и
   // задержало первый запрос ученика (измерено: 53 с против 28 с)
-  assert.ok(/def warmup\(\)/.test(app) && /warmup\(\)\n    uvicorn\.run/.test(app), 'модели не прогреваются до старта сервиса');
+  assert.ok(/def warmup\(\)/.test(app), 'нет прогрева моделей до старта сервиса');
+  assert.ok(app.indexOf('\n    warmup()') > 0 && app.indexOf('\n    warmup()') < app.indexOf('uvicorn.run(app'),
+    'модели прогреваются не до старта сервиса (или прогрев пропал)');
   assert.ok(!/Thread\(target=warmup/.test(app), 'прогрев снова запускает распознавание: он задержит первый запрос');
   assert.ok(/recognize-\{int\(time\.time\(\)/.test(app), 'результат страницы Gradio пишется под одним именем — запросы затрут друг друга');
 

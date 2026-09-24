@@ -208,6 +208,30 @@ if (!modelFiles.some((file) => file.startsWith('segnet_'))) problems.push('не�
 if (!modelFiles.some((file) => file.startsWith('encoder_'))) problems.push('нет энкодера трансформера');
 if (!modelFiles.some((file) => file.startsWith('decoder_'))) problems.push('нет декодера трансформера');
 if (!/def check_models\(/.test(appSource)) problems.push('app.py не сверяет набор моделей с тем, что ждёт версия движка');
+// Серверный рендеринг: при GRADIO_SSR_MODE=true (его включает Hugging Face) mount_gradio_app сам поднимает
+// Node-сервер, а тот по умолчанию занимает порт 7860 (gradio/node_server.py: INITIAL_PORT_VALUE=7860) —
+// нашему uvicorn порт не достаётся, пространство падает с «address already in use» и уходит в перезапуск.
+if (!/ssr_mode=False/.test(appSource)) problems.push('app.py монтирует страницу Gradio с серверным рендерингом: Gradio займёт порт 7860 и сервис не запустится');
+// Железо: сервис процессорный, поэтому пространству подходит CPU basic (бесплатный, без видеокарты).
+// Среда ZeroGPU отказывается запускать пространство без функции с @spaces.GPU среди обработчиков страницы
+// («No @spaces.GPU function detected during startup»). Пометка устроена так (spaces/zero/decorator.py):
+// на ZeroGPU декоратор ставит обёртке атрибут `zerogpu`, и среда видит его в `blocks.fns[*].fn` — проверено
+// в образе с SPACES_ZERO_GPU=true. Поэтому помечен обработчик вкладки «Состояние сервиса», а распознавание
+// нет: оно считает на процессоре, и телефонный путь /recognize видеокарту не трогает. Импорт защищён, а на
+// процессорном железе пометка становится пустой — иначе сервис упал бы там, где пакета `spaces` нет.
+if (!/@spaces\.GPU/.test(appSource)) problems.push('в app.py нет пометки @spaces.GPU для обработчика страницы: среда ZeroGPU не запустит пространство');
+if (!/fn=service_state/.test(appSource)) problems.push('помеченная функция не отдана Gradio: среда ищет пометку в blocks.fns[*].fn, а не в модуле');
+if (!/class _SpacesOnCpu/.test(appSource) || !/return task if task is not None else/.test(appSource)) problems.push('нет замены пакета spaces для процессорного железа: пометка @spaces.GPU уронит сервис без пакета');
+if (!/except Exception:[\s\S]{0,300}ZERO_GPU = False/.test(appSource)) problems.push('импорт spaces не защищён: на процессорном железе сервис упадёт');
+if (!/ZERO_GPU/.test(appSource)) problems.push('app.py не сообщает в журнал, на каком железе он работает');
+if (/@spaces\.GPU\s*\ndef recognize_from_ui/.test(appSource)) problems.push('распознавание помечено @spaces.GPU: оно считает на процессоре и не должно занимать видеокарту');
+
+// Локальная проверка должна повторять условия облака, иначе она пропускает целые классы ошибок
+const dockerTestSource = readFileSync(join(OUT, 'Dockerfile.test'), 'utf8');
+if (!/python:3\.10\.13-slim/.test(dockerTestSource)) problems.push('Dockerfile.test собран не на Python 3.10.13: на другой версии ставится другой homr и другой набор моделей');
+if (!/GRADIO_SSR_MODE=true/.test(dockerTestSource)) problems.push('Dockerfile.test не включает серверный рендеринг: ошибку с занятым портом 7860 он не поймает');
+if (!/apt-get install -y nodejs/.test(dockerTestSource)) problems.push('Dockerfile.test не ставит Node 20, без него серверный рендеринг не воспроизведётся');
+if (!/pip install --no-cache-dir spaces/.test(dockerTestSource)) problems.push('Dockerfile.test не ставит пакет spaces: проверка не повторит среду ZeroGPU');
 if (files.some((file) => file.startsWith('service/deps/'))) problems.push('в пакет попали локальные пакеты server/deps (1 ГБ)');
 if (files.some((file) => file === 'Dockerfile')) problems.push('в Gradio-пакет попал Dockerfile — он бы сбил Hugging Face с толку');
 if (!files.includes('Dockerfile.test')) problems.push('нет Dockerfile.test — нечем проверить пакет локально');

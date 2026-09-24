@@ -8,15 +8,17 @@ Gradio-пространство и **монтируем в него свой Fas
 на экране «Сканировать» просто вписывается адрес вида `https://имя-пространства.hf.space`.
 
 Порядок работы этого файла:
-  1) модели движка (3 файла ONNX, 150 МБ) раскладываются из папки `models/` репозитория в пакет homr —
+  1) объявляется функция-заглушка с `@spaces.GPU` — этого требует среда ZeroGPU, на которой работают
+     бесплатные Gradio-пространства (видеокарта при этом не используется и не запрашивается);
+  2) модели движка (3 файла ONNX, 150 МБ) раскладываются из папки `models/` репозитория в пакет homr —
      тогда после «пробуждения» пространства ничего не скачивается заново (диск на бесплатном тарифе
      непостоянный). Если папки нет, движок скачает модели сам при первом запросе;
-  2) модели сверяются с тем, что ждёт установленная версия движка (`check_models`): у homr 0.6.2 (его
+  3) модели сверяются с тем, что ждёт установленная версия движка (`check_models`): у homr 0.6.2 (его
      ставит pip на Python 3.10) это модели 331, у 0.7.0 — 396, и набор не той версии движок скачает сам;
-  3) поднимается наш FastAPI из `service/main.py`;
-  4) в него монтируется простая страница Gradio — её видно на вкладке «App», ею удобно проверить
-     сервис руками: загрузить фото страницы и получить MusicXML;
-  5) uvicorn слушает порт 7860, которого ждёт Hugging Face.
+  4) поднимается наш FastAPI из `service/main.py`;
+  5) в него монтируется простая страница Gradio (без серверного рендеринга — иначе Node-сервер Gradio
+     занимает порт 7860): её видно на вкладке «App», ею удобно проверить сервис руками;
+  6) uvicorn слушает порт 7860, которого ждёт Hugging Face.
 """
 
 from __future__ import annotations
@@ -44,6 +46,39 @@ os.environ.setdefault("RECOGNIZE_TIMEOUT", "240")
 # а не переменная. Что файлы действительно те, которые ждёт движок, проверяет check_models() при старте.
 
 sys.path.insert(0, str(SERVICE))
+
+# --- Железо: наш сервис процессорный, а бесплатные Gradio-пространства попадают на ZeroGPU -------------
+# Среда ZeroGPU не запускает пространство, если не находит функции, помеченной @spaces.GPU среди обработчиков
+# страницы Gradio:
+#     runtime error: No @spaces.GPU function detected during startup
+# Как устроена пометка (spaces/zero/decorator.py, функция _GPU): на ZeroGPU декоратор помечает обёртку
+# атрибутом `zerogpu` (`setattr(decorated, 'zerogpu', None)`), а вне ZeroGPU возвращает функцию как есть.
+# Проверено в образе с включённым режимом ZeroGPU (SPACES_ZERO_GPU=true): у функции-обработчика пометка
+# появляется, и она видна там, куда смотрит среда — в корневой странице один обработчик с пометкой:
+#     blocks.fns[*].fn.zerogpu
+# Первая попытка (объявленная в модуле функция, не отданная Gradio) не сработала именно поэтому: пометка была,
+# но ни один обработчик страницы её не имел. Настоящее решение — держать пространство на процессорном железе
+# (CPU basic), если оно доступно: движок homr (ONNX) считает на процессоре, видеокарта сервису не нужна.
+# Ниже — подстраховка для ZeroGPU: помечен обработчик вкладки «Состояние сервиса», а само распознавание — нет
+# (оно считает на процессоре, и телефонный путь POST /recognize видеокарту не трогает).
+# Декоратор написан буквально как `@spaces.GPU`: если среда разбирает исходный текст приложения, она увидит
+# привычное написание. На процессорном железе пакета `spaces` может не быть, поэтому импорт защищён, а вместо
+# пакета подставляется замена, у которой @spaces.GPU ничего не делает.
+try:
+    import spaces
+
+    ZERO_GPU = True
+except Exception:  # noqa: BLE001 — на процессорном железе пакета может не быть
+    ZERO_GPU = False
+
+    class _SpacesOnCpu:
+        """Замена пакета spaces на процессорном железе: пометка @spaces.GPU становится пустой."""
+
+        @staticmethod
+        def GPU(task=None, **_kwargs):
+            return task if task is not None else (lambda function: function)
+
+    spaces = _SpacesOnCpu()
 
 
 def model_dirs() -> tuple[Path, Path]:
@@ -185,7 +220,62 @@ def _example_files() -> list[str]:
     return [str(path) for path in sorted(EXAMPLES.glob("*.png"))[:2]]
 
 
-demo = gr.Interface(
+def _available_cpus() -> int:
+    """Сколько ядер сервису действительно разрешено.
+
+    `os.cpu_count()` показывает ядра машины целиком и в контейнере врёт (на бесплатном тарифе ядер два, а он
+    может показать все ядра хоста). Ограничение контейнера задаётся квотой cgroup — её и читаем: сначала
+    cgroup версии 2 (`/sys/fs/cgroup/cpu.max`), потом версии 1. Если квоты нет, остаётся общий счётчик.
+    """
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, round(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, round(quota / period))
+    except (OSError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
+@spaces.GPU
+def service_state() -> str:
+    """Ответ вкладки «Состояние сервиса»: ничего не считает, видеокарту не использует.
+
+    Пометка @spaces.GPU здесь — подстраховка на случай, если пространство окажется на железе ZeroGPU: его
+    среда запускает пространство только тогда, когда среди обработчиков страницы есть помеченная функция, и
+    видит пометку именно в `blocks.fns[*].fn` (проверено в образе с SPACES_ZERO_GPU=true). Если пространство
+    на процессорном железе, пометка ничего не делает.
+    """
+    from engines import available_engines
+
+    engines = available_engines()
+    ready = [f"{name} — {info['reason'] or 'готов'}" for name, info in engines.items()]
+    missing = MODELS_CHECK["missing"]
+    lines = [
+        "**Сервис распознавания FluteBand AI отвечает.**",
+        "",
+        f"- движки: {'; '.join(ready)}",
+        f"- модели движка: ожидается {MODELS_CHECK['expected']}, "
+        + ("все на месте" if not missing else f"нет: {', '.join(missing)}"),
+        f"- модели взяты: {MODELS_REPORT.get('source')}",
+        f"- железо пространства: {'ZeroGPU (среда требует пометку @spaces.GPU)' if ZERO_GPU else 'процессорное (CPU basic)'}",
+        f"- ядер доступно: {_available_cpus()}, потоков движку: {os.environ.get('OMP_NUM_THREADS')}",
+        f"- предел времени на распознавание: {os.environ.get('RECOGNIZE_TIMEOUT')} с",
+        "",
+        "Распознавание считает на процессоре (движок homr, ONNX) — видеокарта сервису не нужна. "
+        "Телефон обращается к этому же пространству по адресу вида "
+        "`https://имя-пространства.hf.space`, маршрут `POST /recognize`.",
+    ]
+    return "\n".join(lines)
+
+
+recognize_page = gr.Interface(
     fn=recognize_from_ui,
     inputs=[
         gr.Image(type="filepath", label="Фото страницы с нотами", sources=["upload", "webcam"]),
@@ -211,10 +301,48 @@ demo = gr.Interface(
     flagging_mode="never",
 )
 
+# Вторая вкладка — приёмка средой и ручная проверка «сервис жив». Её обработчик помечен @spaces.GPU
+# (см. объяснение выше): среда ZeroGPU смотрит именно обработчики страницы, а не модуль целиком.
+state_page = gr.Interface(
+    fn=service_state,
+    inputs=None,
+    outputs=gr.Textbox(label="Ответ сервиса", lines=12),
+    title="Состояние сервиса",
+    description=(
+        "Вкладка ничего не считает: она показывает, какие движки и модели видит сервис. "
+        "Распознавание нот всегда идёт на процессоре; эта вкладка помечена для среды ZeroGPU потому, "
+        "что без обработчика с такой пометкой пространство не запускается."
+    ),
+    submit_btn="Проверить сервис",
+    flagging_mode="never",
+)
+
+demo = gr.TabbedInterface(
+    [recognize_page, state_page],
+    ["Проверка распознавания", "Состояние сервиса"],
+    title="FluteBand AI — сервис распознавания нот",
+)
+
 # Монтируем страницу Gradio в наш FastAPI. Наши маршруты (/health, /engines, /recognize) объявлены
 # раньше, поэтому в root они и остаются, а всё остальное отдаёт Gradio — так требование Hugging Face
 # «SDK: Gradio» выполняется, и при этом REST-контракт сервиса не меняется.
-app = gr.mount_gradio_app(api, demo, path="/")
+#
+# ssr_mode=False — не украшение, а необходимость, и вот почему. Hugging Face включает у Gradio-пространств
+# серверный рендеринг (`GRADIO_SSR_MODE=true`; поэтому в сборку пространства и ставится Node 20, а в журнале
+# видно «Trying to transpile functions from Python -> JS»). Внутри Gradio при этом происходит вот что
+# (gradio/routes.py, функция mount_gradio_app):
+#     blocks.ssr_mode = blocks._resolve_ssr_mode(ssr_mode)
+#     if blocks.ssr_mode:
+#         ... = start_node_server(server_name=..., server_port=blocks.node_port, ...)
+# то есть mount_gradio_app **сам поднимает Node-сервер**, а тот берёт первый свободный порт начиная с
+# `GRADIO_SERVER_PORT` — по умолчанию 7860 (gradio/node_server.py: `INITIAL_PORT_VALUE = 7860`).
+# В облаке это выглядело так: сервис стартовал, писал «Application startup complete», а затем падал с
+# `ERROR: [Errno 98] error while attempting to bind on address ('0.0.0.0', 7860): address already in use`,
+# потому что порт уже занял Node-сервер Gradio, поднятый строкой ниже. Пространство уходило в перезапуск
+# (в журнале это видно как повторяющиеся попытки, выход с кодом 3).
+# Серверный рендеринг нужен для поисковой выдачи и скорости отрисовки больших страниц; у нас это маленькая
+# страница ручной проверки, а порт 7860 нужен самому сервису (его ждёт Hugging Face), поэтому SSR выключаем.
+app = gr.mount_gradio_app(api, demo, path="/", ssr_mode=False)
 
 
 def warmup() -> None:
@@ -252,4 +380,25 @@ if __name__ == "__main__":
     elif MODELS_CHECK["expected"]:
         print(f"FluteBand AI: движок ждёт {MODELS_CHECK['expected']} файла моделей — все на месте", flush=True)
     warmup()
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]), log_level="info")
+    print("FluteBand AI: страница проверки отдаётся без серверного рендеринга (ssr_mode=False)", flush=True)
+    if ZERO_GPU:
+        print(
+            "FluteBand AI: среда ZeroGPU — вкладка «Состояние сервиса» помечена @spaces.GPU "
+            "(распознавание считает на процессоре)",
+            flush=True,
+        )
+    else:
+        print("FluteBand AI: пакет spaces не установлен — пространство на процессорном железе", flush=True)
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]), log_level="info")
+    except (OSError, SystemExit) as error:
+        # Понятный текст вместо голого «address already in use»: эту ошибку уже ловили в облаке, когда
+        # порт занимал Node-сервер серверного рендеринга Gradio (см. комментарий к ssr_mode=False выше).
+        print(
+            "FluteBand AI: не удалось занять порт "
+            f"{os.environ['PORT']} ({error}). Порт должен быть свободен: его ждёт Hugging Face для сервиса. "
+            "Проверьте, что страница Gradio монтируется с ssr_mode=False, и что в контейнере не запущен "
+            "другой сервер на этом порту.",
+            flush=True,
+        )
+        raise SystemExit(1) from error

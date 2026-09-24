@@ -7,8 +7,15 @@
 #   docker build -f dist-space-gradio/Dockerfile.test -t fluteband-gradio dist-space-gradio
 #   docker run --rm -p 7860:7860 --cpus=2 --memory=4g fluteband-gradio
 #   curl http://127.0.0.1:7860/health
-
-FROM python:3.11-slim
+#
+# Проверка обязана повторять не только зависимости, но и **условия запуска**, иначе она пропускает
+# ошибки, которые видно только в облаке. Два таких условия добавлены намеренно:
+#   * python 3.10.13 — ровно как в базовом образе пространства. На 3.10 pip ставит homr 0.6.2 (а не
+#     0.7.0, как на 3.11), и версии ищут РАЗНЫЕ файлы моделей: проверка на 3.11 эту беду не видит;
+#   * Node 20 и GRADIO_SSR_MODE=true — серверный рендеринг, который включает Hugging Face. Из-за него
+#     mount_gradio_app сам поднимает Node-сервер, а тот занимает порт 7860 начиная с него же, и наш
+#     uvicorn падал с «address already in use» (см. комментарий в app.py).
+FROM python:3.10.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -16,7 +23,8 @@ ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=2 \
     RECOGNIZE_TIMEOUT=240 \
     FLUTEBAND_WORK_DIR=/tmp/omr-work \
-    HF_HOME=/tmp/hf-cache
+    HF_HOME=/tmp/hf-cache \
+    GRADIO_SSR_MODE=true
 
 WORKDIR /app
 
@@ -28,10 +36,19 @@ WORKDIR /app
 COPY packages.txt ./
 RUN apt-get update \
     && xargs -r -a packages.txt apt-get install -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Пакет `spaces` есть в среде ZeroGPU, на которой работают бесплатные Gradio-пространства (он нужен для
+# @spaces.GPU, без которого среда отказывается запускать пространство: «No @spaces.GPU function detected
+# during startup»). Ставим его и здесь, чтобы проверка повторяла ту же среду; на процессорном железе
+# (CPU basic) пакета может не быть — app.py это учитывает.
+RUN pip install --no-cache-dir spaces
 
 COPY . .
 
